@@ -7915,6 +7915,24 @@ class TestStats:
         with pytest.warns(RuntimeWarning) as w:
             assert_equal(np.std(a, where=False), np.nan)
 
+    def test_mean_var_std_dtype_from_true_divide(self):
+        # gh-XXXXX: `_mean`/`_var` picked a float64 result only for the
+        # builtin integer and bool dtypes, so a non-legacy integer-like
+        # DType dividing to a different (float) DType via `true_divide` had
+        # its sum truncated back to its own, integer, dtype -- silently
+        # wrong, since `mean([1, 2])` should never come out as `1`.
+        #
+        # There is no lightweight non-legacy integer DType in this test
+        # suite to reproduce the truncation itself (`StringDType` has no
+        # `true_divide` loop at all), so this only pins that the new
+        # fallback leaves such a DType's own error untouched.
+        sdt = np.dtypes.StringDType()
+        a = np.array(["a", "bb"], dtype=sdt)
+        with pytest.raises(TypeError):
+            np.mean(a)
+        with pytest.raises(TypeError):
+            np.var(a)
+
     def test_subclass(self):
         class TestArray(np.ndarray):
             def __new__(cls, data, info):

@@ -128,6 +128,18 @@ def _mean(a, axis=None, dtype=None, out=None, keepdims=False, *, where=True):
         elif issubclass(arr.dtype.type, nt.float16):
             dtype = mu.dtype('f4')
             is_float16_result = True
+        elif not type(arr.dtype)._legacy:
+            # A non-legacy DType may have its own opinion of what dividing by
+            # a count gives (e.g. a nullable integer dtype dividing to a
+            # nullable float one); ask `true_divide` and only act on the
+            # answer if it differs from `arr.dtype`.  Builtin dtypes already
+            # picked their own answer above and never reach this branch.
+            try:
+                res = um.true_divide.resolve_dtypes((arr.dtype, int, None))[2]
+            except TypeError:
+                res = arr.dtype
+            if res != arr.dtype:
+                arr = arr.astype(res)
 
     ret = umr_sum(arr, axis, dtype, out, keepdims, where=where)
     if isinstance(ret, mu.ndarray):
@@ -156,8 +168,17 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
                       stacklevel=2)
 
     # Cast bool, unsigned int, and int to float64 by default
-    if dtype is None and issubclass(arr.dtype.type, (nt.integer, nt.bool)):
-        dtype = mu.dtype('f8')
+    if dtype is None:
+        if issubclass(arr.dtype.type, (nt.integer, nt.bool)):
+            dtype = mu.dtype('f8')
+        elif not type(arr.dtype)._legacy:
+            # See the matching branch in `_mean`.
+            try:
+                res = um.true_divide.resolve_dtypes((arr.dtype, int, None))[2]
+            except TypeError:
+                res = arr.dtype
+            if res != arr.dtype:
+                arr = arr.astype(res)
 
     if mean is not None:
         arrmean = mean
