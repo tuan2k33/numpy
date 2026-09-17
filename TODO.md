@@ -42,6 +42,29 @@ branches. Track upstream and rebase periodically rather than diverging long-term
   (`numpy/_core/src/common/simd/`) to add the AVX-512 masked variant per loop
   rather than building runtime CPU dispatch from scratch.
 
+## Existing test suites to reuse as templates / regression baseline
+
+No dedicated test suite exists yet (feature isn't written). These existing
+numpy test files cover the same ground and should be mined per phase — either
+as a pattern to copy for the masked case, or as the no-mask regression
+baseline that must keep passing unchanged:
+
+| Phase | Template / baseline file | Why |
+|---|---|---|
+| 2 — ufunc dispatch | `numpy/_core/tests/test_umath.py` (5474 lines), `test_ufunc.py` (3523 lines) | Per-ufunc correctness tests; run unmodified against `mask=None` as the zero-regression check; mine for cases to duplicate with a masked operand |
+| 3 — reductions | `numpy/_core/tests/test_umath.py` (reduce/accumulate sections), `numpy/ma/tests/test_core.py` (`MaskedArray.sum`/`mean`/etc semantics — closest prior art for what "reduce over a gap" should mean) | `numpy.ma`'s reduction semantics are the direct precedent to compare against/diverge from deliberately |
+| 4 — view propagation | `numpy/_core/tests/test_shape_base.py`, `numpy/ma/tests/test_subclassing.py` (469 lines — how `numpy.ma` keeps `.mask` attached through view ops, and where it historically didn't) | `test_subclassing.py` is effectively a list of past leak bugs to not repeat |
+| 5 — indexing | `numpy/_core/tests/test_indexing.py` (1717 lines) | Most thorough existing coverage of basic/advanced/boolean indexing edge cases |
+| 6 — sort/search | `numpy/_core/tests/test_item_selection.py` (178 lines) | Covers `take`/`put`/`choose`/`repeat`; small, good starting template |
+| 9 — casting | `numpy/_core/tests/test_multiarray.py` (12122 lines, has `astype`/casting sections) | Largest file — grep for `astype`/`can_cast` sections rather than reading whole file |
+| 10 — Python surface | `numpy/ma/tests/test_core.py` (6276 lines), `test_old_ma.py` (939 lines), `test_mrecords.py` (513 lines), `test_deprecations.py`, `test_regression.py` | The full `numpy.ma` suite — closest thing to "what a masked-array test suite looks like end to end"; also the best source of regression cases for exactly the leak/surprise bugs this design is meant to avoid |
+
+`numpy/ma/tests/` in particular is worth a full pass before writing any new
+test: most of its ~7800 lines encode a real bug or surprising-behavior
+decision made over `numpy.ma`'s lifetime — deciding *on purpose* whether the
+mask-in-core design repeats or fixes each one is more valuable than writing
+tests from scratch.
+
 ## Phases
 
 - [ ] **0 — Setup**
