@@ -1,6 +1,8 @@
 # Benchmarks — informal cross-venv timing log
 
-Latest measurement per op only. `fork nomask vs upstream %` is `—` when
+All timing columns are **milliseconds (ms)**, formatted `min / median`
+over 20-30 repeats (`N=2_000_000` for phase 2-3 ops, `N=500_000` for
+phase 4 ops). Latest measurement per op only. `fork nomask vs upstream %` is `—` when
 within the established ±15% noise tolerance (debug-vs-release build
 confound, not a regression signal); a shown % means it exceeded that
 tolerance on this run. Only a consistent one-directional shift across

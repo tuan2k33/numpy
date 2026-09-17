@@ -509,10 +509,41 @@ tests from scratch.
         phase 2 already; this is the rest)
   - [ ] `multiarray/getset.c` (`.T` and friends)
   - [ ] `multiarray/ctors.c` (`broadcast_to`)
-  - [ ] **Deferred phase-4 perf backlog** (from `BENCHMARKS.md`'s
-        same-build masked-vs-unmasked numbers — real, direction-consistent
-        overhead across reruns, not noise; attempted mid-session and
-        reverted, see below, not yet actually implemented):
+  - [ ] **Low-priority perf backlog, not phase 5's actual scope** (from
+        `BENCHMARKS.md`'s same-build masked-vs-unmasked numbers — real,
+        direction-consistent overhead across reruns, not noise; attempted
+        mid-session and reverted, see below, not yet actually
+        implemented). **Deliberately downgraded**: the current design
+        throughout phases 1-4 is exactly
+
+        ```
+        data
+          ↓
+        existing NumPy machinery
+          ↓
+        correct result
+
+        mask
+          ↓
+        existing NumPy machinery
+          ↓
+        correct mask
+        ```
+
+        i.e. every mask operation reuses an *already-correct, already-
+        tested* piece of NumPy (`logical_or.reduce`/`.accumulate`/`.at`/
+        `PyNumber_Or`/`PyArray_Where`/...) instead of hand-rolled loops --
+        this is what makes phases 1-4's correctness easy to trust and
+        cheap to leak-check. Every item below trades that away for speed
+        by fusing mask logic into shared, delicate, correctness-critical
+        NumPy internals (`NpyIter`, `PyArrayMapIterObject`, SIMD/scalar
+        dtype loops). Not worth doing until the feature is functionally
+        complete (later phases) and there's a real, profiled need --
+        premature here, and the P2 attempt this session (optimized the
+        wrong function entirely, `PyArray_Std` instead of `_methods.py`)
+        is a concrete example of the kind of mistake this risk trades in
+        for. Revisit only after phases 5-11 land, alongside phase 12/13's
+        planned perf work, not opportunistically mid-phase.
     - [ ] P0 `add.at` (~+54-170% overhead, worst in the table): loại bỏ
           hẳn pass `ufunc_at()` thứ hai — fuse mask OR trực tiếp vào cùng
           vòng lặp index đang có sẵn trong `ufunc_at__fast_iter`/
