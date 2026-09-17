@@ -69,6 +69,22 @@ static const int NPY_ARRAY_WAS_INT_AND_REPLACED = (1 << 27);
 static const int NPY_ARRAY_WAS_PYTHON_LITERAL = (1 << 30 | 1 << 29 | 1 << 28);
 
 /*
+ * Set on a bool-dtype array while it is attached as *some* array's `mask`
+ * (see `PyArray_SetMaskObject` in arrayobject.c). This is what actually
+ * enforces "a mask can never itself have a mask": dtype alone can't do it,
+ * since ordinary bool arrays (e.g. comparison-ufunc results) must still be
+ * allowed to carry their own mask when they aren't currently serving as
+ * anyone else's mask. Set when attached, cleared when detached/replaced.
+ * Not refcounted -- if the same array object is deliberately shared as the
+ * mask for more than one owner (attaching by object identity, not via a
+ * `.view()` of it), detaching from one owner clears this flag even though
+ * another owner may still reference it; that's an accepted limitation of
+ * a niche, undesigned-for usage rather than the normal per-owner
+ * `.view()`-based sharing phase 2 relies on.
+ */
+static const int NPY_ARRAY_IS_MASK = (1 << 24);
+
+/*
  * Mark an array converted from an exact Python str.  Unlike the flags above
  * it does not participate in promotion (the array keeps its discovered
  * dtype); it only lets scalar-aware paths (ufuncs, copyto, where) convert

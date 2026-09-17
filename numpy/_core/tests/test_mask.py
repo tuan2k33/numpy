@@ -47,13 +47,32 @@ class TestMaskInvariants:
         with pytest.raises(ValueError):
             a.mask = np.zeros(4, dtype=bool)
 
-    def test_bool_array_cannot_carry_a_mask(self):
+    def test_bool_array_not_in_use_as_a_mask_can_carry_one(self):
+        # Not every bool array is a mask (e.g. comparison-ufunc results,
+        # phase 3) -- only an array *currently serving as someone else's
+        # mask* is forbidden from carrying one, see
+        # test_array_in_use_as_a_mask_cannot_carry_one below.
+        m = np.array([True, False, True])
+        m.mask = np.array([False, True, False])
+        assert m.mask is not None
+
+    def test_array_in_use_as_a_mask_cannot_carry_one(self):
         # Closes the point-in-time hole: without this, `m = arr.mask;
         # m.mask = x` could nest a mask onto a mask after the fact, even
         # though attaching `m` to `arr` was valid at the time.
+        a = np.arange(3)
         m = np.array([True, False, True])
+        a.mask = m
         with pytest.raises(TypeError):
             m.mask = np.array([False, True, False])
+
+    def test_mask_can_carry_a_mask_after_being_detached(self):
+        a = np.arange(3)
+        m = np.array([True, False, True])
+        a.mask = m
+        a.mask = None  # detach; `m` is no longer in use as a's mask
+        m.mask = np.array([False, True, False])
+        assert m.mask is not None
 
     def test_all_false_mask_canonicalized_to_none(self):
         a = np.arange(5)
@@ -252,3 +271,131 @@ class TestMaskSortPartition:
         b = np.array([3, 1, 4, 1, 5])
         b.partition(2)
         assert b.mask is None
+
+
+class TestMaskUfuncPropagation:
+    """
+    Phase 3: elementwise ufunc calls (arithmetic, trig, comparisons, and
+    operator overloads that route through the same ufunc call) OR their
+    input masks together, broadcast to the output shape. Mask never
+    affects computation -- the underlying data is always the same as the
+    unmasked equivalent.
+    """
+
+    def test_add_ors_masks(self):
+        a = np.array([1, 2, 3, 4])
+        b = np.array([10, 20, 30, 40])
+        a.mask = np.array([True, False, False, False])
+        b.mask = np.array([False, False, True, False])
+
+        c = a + b
+        assert np.array_equal(c, [11, 22, 33, 44])
+        assert np.array_equal(c.mask, [True, False, True, False])
+
+    def test_np_add_matches_operator(self):
+        a = np.array([1.0, 2.0, 3.0])
+        a.mask = np.array([True, False, False])
+        b = np.array([1.0, 1.0, 1.0])
+
+        c1 = a + b
+        c2 = np.add(a, b)
+        assert np.array_equal(c1.mask, c2.mask)
+        assert np.array_equal(c1.mask, [True, False, False])
+
+    def test_one_sided_mask_broadcasts_to_output_shape(self):
+        a = np.array([1, 2, 3])
+        a.mask = np.array([False, True, False])
+        b = np.array([[10], [20]])  # unmasked, broadcasts a to (2, 3)
+
+        c = a + b
+        assert c.shape == (2, 3)
+        assert np.array_equal(c.mask, [[False, True, False],
+                                        [False, True, False]])
+
+    def test_unary_ufunc_propagates_mask(self):
+        a = np.array([1.0, 4.0, 9.0])
+        a.mask = np.array([False, True, False])
+        b = np.sqrt(a)
+        assert np.array_equal(b, [1.0, 2.0, 3.0])
+        assert np.array_equal(b.mask, [False, True, False])
+
+    def test_trig_propagates_mask(self):
+        a = np.array([0.0, np.pi / 2, np.pi])
+        a.mask = np.array([True, False, False])
+        b = np.sin(a)
+        assert np.array_equal(b.mask, [True, False, False])
+
+    def test_comparison_propagates_mask(self):
+        # Comparisons produce bool-dtype output -- this is exactly the case
+        # that broke a too-strict earlier version of the mask invariant
+        # (see "Settled design decisions" in TODO.md): the bool result must
+        # still be able to carry its own mask.
+        a = np.array([1, 2, 3])
+        b = np.array([3, 2, 1])
+        a.mask = np.array([True, False, False])
+
+        c = a < b
+        assert np.array_equal(c, [True, False, False])
+        assert np.array_equal(c.mask, [True, False, False])
+        assert c.mask.dtype == bool
+
+    def test_no_masked_inputs_leaves_result_unmasked(self):
+        a = np.array([1, 2, 3])
+        b = np.array([4, 5, 6])
+        assert (a + b).mask is None
+        assert (a < b).mask is None
+        assert np.sin(a).mask is None
+
+    def test_inplace_operator_updates_mask(self):
+        a = np.array([1.0, 2.0, 3.0])
+        a.mask = np.array([False, True, False])
+        b = np.array([10.0, 10.0, 10.0])
+        b.mask = np.array([False, False, True])
+
+        a += b
+        assert np.array_equal(a, [11.0, 12.0, 13.0])
+        assert np.array_equal(a.mask, [False, True, True])
+
+    def test_out_kwarg_updates_mask(self):
+        a = np.array([1, 2, 3])
+        b = np.array([4, 5, 6])
+        a.mask = np.array([True, False, False])
+        out = np.zeros(3, dtype=a.dtype)
+
+        result = np.add(a, b, out=out)
+        assert result is out
+        assert np.array_equal(out.mask, [True, False, False])
+
+    def test_result_mask_is_independent_new_array(self):
+        # The result's mask must be its own buffer, not aliasing an input's.
+        a = np.array([1, 2, 3])
+        a.mask = np.array([True, False, False])
+        b = np.array([4, 5, 6])
+
+        c = a + b
+        c.mask[0] = False
+        assert a.mask[0] == True
+
+    def test_where_kwarg_skips_mask_propagation(self):
+        # Documented gap: `where=` (partial writes) is not yet handled --
+        # mask propagation is skipped entirely rather than risk computing
+        # it wrong for the elements `where` excludes. Data is unaffected
+        # either way (mask never affects computation).
+        a = np.array([1, 2, 3])
+        a.mask = np.array([True, False, False])
+        b = np.array([4, 5, 6])
+        out = np.zeros(3, dtype=int)
+        r = np.add(a, b, out=out, where=np.array([True, True, False]))
+        assert np.array_equal(r[:2], [5, 7])
+        assert r.mask is None
+
+    def test_multi_output_ufunc_propagates_mask_to_each_output(self):
+        x = np.array([7, 8, 9])
+        x.mask = np.array([True, False, False])
+        y = np.array([2, 2, 2])
+
+        q, r = np.divmod(x, y)
+        assert np.array_equal(q, [3, 4, 4])
+        assert np.array_equal(r, [1, 0, 1])
+        assert np.array_equal(q.mask, [True, False, False])
+        assert np.array_equal(r.mask, [True, False, False])

@@ -5206,6 +5206,140 @@ fail:
 
 
 /*
+ * Phase 3 (see TODO.md): mask propagation for plain elementwise ufunc
+ * calls -- arithmetic, trig, comparisons, and anything else that isn't a
+ * gufunc, reached from here (this single choke point also covers operator
+ * overloads: `a + b` calls PyArray_GenericBinaryFunction, which vectorcalls
+ * the `add` ufunc object exactly like `np.add(a, b)` would).
+ *
+ * Correctness-first, like phase 2's sort/partition fallback: the actual
+ * AVX-512 masked SIMD loop described in "Settled design decisions" is a
+ * real performance project of its own, deferred to a later phase. This
+ * instead treats `ufunc_generic_fastcall` as a black box -- data is always
+ * fully computed regardless of mask (mask affects observability, not
+ * computation, see "Mask semantics and propagation"), so the existing,
+ * already-correct and already-optimized call is left completely
+ * untouched; only the *result's* mask is computed afterwards, by
+ * OR-broadcasting the input masks together via the existing `bitwise_or`
+ * ufunc machinery (which itself takes the fast mask==NULL path, since
+ * mask arrays can never themselves carry a mask).
+ *
+ * Known, deliberate gaps (not a phase-3 blocker, just not yet handled):
+ *   - `where=` (partial writes) is skipped entirely -- an output element
+ *     `where` excludes keeps its old value *and* old mask, which this
+ *     function does not attempt to reproduce correctly, so it leaves
+ *     mask propagation off rather than risk getting it silently wrong.
+ *   - A 0-d result that decays to a plain Python/numpy scalar (not a
+ *     PyArrayObject) can't carry a mask -- that piece of information is
+ *     dropped for that call, since scalar types have no `mask` field.
+ *   - gufuncs (`ufunc->core_enabled`, e.g. `matmul`) are excluded --
+ *     that's phase 9.
+ */
+static int
+_ufunc_call_has_where_kwarg(PyObject *kwnames)
+{
+    if (kwnames == NULL) {
+        return 0;
+    }
+    Py_ssize_t n = PyTuple_GET_SIZE(kwnames);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *name = PyTuple_GET_ITEM(kwnames, i);
+        if (PyUnicode_CompareWithASCIIString(name, "where") == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int
+_propagate_ufunc_result_mask(PyUFuncObject *ufunc,
+        PyObject *const *args, Py_ssize_t nargs, PyObject *result)
+{
+    int nin = ufunc->nin;
+    int nout = ufunc->nout;
+
+    PyObject *combined_mask = NULL;  /* new reference */
+    for (int i = 0; i < nin && i < nargs; i++) {
+        if (!PyArray_Check(args[i])) {
+            continue;
+        }
+        PyObject *m = PyArray_MASK((PyArrayObject *)args[i]);
+        if (m == NULL) {
+            continue;
+        }
+        if (combined_mask == NULL) {
+            Py_INCREF(m);
+            combined_mask = m;
+        }
+        else {
+            PyObject *next = PyNumber_Or(combined_mask, m);
+            Py_DECREF(combined_mask);
+            if (next == NULL) {
+                return -1;
+            }
+            combined_mask = next;
+        }
+    }
+    if (combined_mask == NULL) {
+        /* No masked input: nothing to propagate, nothing to touch. */
+        return 0;
+    }
+
+    /* One or many outputs (e.g. `divmod`) -- apply the same combined,
+     * per-output-broadcast mask to each. */
+    PyObject *outputs[NPY_MAXARGS];
+    int n_outputs;
+    if (nout == 1) {
+        outputs[0] = result;
+        n_outputs = 1;
+    }
+    else {
+        if (!PyTuple_Check(result) || PyTuple_GET_SIZE(result) != nout) {
+            /* Unexpected shape of result; nothing safe to do. */
+            Py_DECREF(combined_mask);
+            return 0;
+        }
+        for (int i = 0; i < nout; i++) {
+            outputs[i] = PyTuple_GET_ITEM(result, i);
+        }
+        n_outputs = nout;
+    }
+
+    int ret = 0;
+    for (int i = 0; i < n_outputs; i++) {
+        if (!PyArray_Check(outputs[i])) {
+            /* Decayed to a scalar -- can't carry a mask, see docstring. */
+            continue;
+        }
+        PyArrayObject *out_arr = (PyArrayObject *)outputs[i];
+
+        /* Broadcast `combined_mask` (which may have fewer dims/a smaller
+         * shape than the actual output) up to `out_arr`'s exact shape by
+         * OR-ing it against an explicit same-shape zero array, reusing
+         * ordinary ufunc broadcasting instead of hand-rolled stride math. */
+        PyObject *zeros = PyArray_ZEROS(
+                PyArray_NDIM(out_arr), PyArray_DIMS(out_arr), NPY_BOOL, 0);
+        if (zeros == NULL) {
+            ret = -1;
+            break;
+        }
+        PyObject *full_mask = PyNumber_Or(combined_mask, zeros);
+        Py_DECREF(zeros);
+        if (full_mask == NULL) {
+            ret = -1;
+            break;
+        }
+        /* Steals full_mask's reference. */
+        if (PyArray_SetMaskObject(out_arr, full_mask) < 0) {
+            ret = -1;
+            break;
+        }
+    }
+    Py_DECREF(combined_mask);
+    return ret;
+}
+
+/*
  * Implement vectorcallfunc which should be defined with Python 3.8+.
  * In principle this could be backported, but the speed gain seems moderate
  * since ufunc calls often do not have keyword arguments and always have
@@ -5219,8 +5353,19 @@ ufunc_generic_vectorcall(PyObject *ufunc,
      * Unlike METH_FASTCALL, `len_args` may have a flag to signal that
      * args[-1] may be (temporarily) used. So normalize it here.
      */
-    return ufunc_generic_fastcall((PyUFuncObject *)ufunc,
-            args, PyVectorcall_NARGS(len_args), kwnames, NPY_FALSE);
+    Py_ssize_t nargs = PyVectorcall_NARGS(len_args);
+    PyObject *result = ufunc_generic_fastcall((PyUFuncObject *)ufunc,
+            args, nargs, kwnames, NPY_FALSE);
+
+    PyUFuncObject *uf = (PyUFuncObject *)ufunc;
+    if (result != NULL && !uf->core_enabled
+            && !_ufunc_call_has_where_kwarg(kwnames)) {
+        if (_propagate_ufunc_result_mask(uf, args, nargs, result) < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+    }
+    return result;
 }
 
 

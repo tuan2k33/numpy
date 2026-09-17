@@ -246,15 +246,19 @@ PyArray_SetBaseObject(PyArrayObject *arr, PyObject *obj)
  * Enforces the invariant that a mask can never itself carry a mask:
  * masking a mask has no defined meaning (see TODO.md) and would make
  * "is this element hidden" an unanswerable, infinitely-recursive question.
- * This is enforced structurally rather than by checking `obj`'s mask field
- * at attach time (a point-in-time check like that has a hole: nothing
- * would stop `arr.mask.mask = x` from nesting a mask *after* `arr.mask`'s
- * initial attach already passed) -- an array of dtype bool can simply never
- * carry a mask, full stop, so the check is made on whichever array is about
- * to *receive* a mask, here `arr` itself, not only on the incoming `obj`.
+ * Dtype alone can't enforce this: mask arrays are always bool, but not
+ * every bool array is a mask (e.g. comparison-ufunc results are bool and
+ * must still be allowed to carry their own mask when phase 3 propagates
+ * one onto them). What actually needs to be forbidden is attaching a mask
+ * to an array *while it is currently serving as someone else's mask* --
+ * tracked via the `NPY_ARRAY_IS_MASK` flag (see arrayobject.h), set when
+ * attached and cleared when detached/replaced, checked on `arr` (the
+ * receiver), which closes the point-in-time hole a check on only the
+ * incoming `obj`'s mask field would have (`arr.mask.mask = x` would
+ * otherwise nest a mask after `arr.mask`'s own initial attach passed).
  *
  * Not yet part of the public C-API table (no numpy_api.py entry) --
- * internal only for phase 1/2. Exposing it publicly is deferred to
+ * internal only for phase 1/2/3. Exposing it publicly is deferred to
  * whichever later phase actually needs external callers to attach masks.
  *
  * Returns 0 on success, -1 on failure.
@@ -265,14 +269,18 @@ PyArray_SetMaskObject(PyArrayObject *arr, PyObject *obj)
     PyArrayObject_fields *fa = (PyArrayObject_fields *)arr;
 
     if (obj == NULL || obj == Py_None) {
+        if (fa->mask != NULL) {
+            PyArray_CLEARFLAGS((PyArrayObject *)fa->mask, NPY_ARRAY_IS_MASK);
+        }
         Py_CLEAR(fa->mask);
         Py_XDECREF(obj);
         return 0;
     }
 
-    if (PyArray_TYPE(arr) == NPY_BOOL) {
+    if (PyArray_CHKFLAGS(arr, NPY_ARRAY_IS_MASK)) {
         PyErr_SetString(PyExc_TypeError,
-                "an array of dtype bool cannot itself carry a mask");
+                "an array currently in use as another array's mask "
+                "cannot itself carry a mask");
         Py_DECREF(obj);
         return -1;
     }
@@ -302,12 +310,6 @@ PyArray_SetMaskObject(PyArrayObject *arr, PyObject *obj)
         return -1;
     }
 
-    /*
-     * Guaranteed redundant given the dtype-bool check above (mask_arr is
-     * bool, and bool arrays can never carry a mask), kept as a cheap
-     * assertion-style guard against the invariant being violated some
-     * other way.
-     */
     if (PyArray_MASK(mask_arr) != NULL) {
         PyErr_SetString(PyExc_ValueError,
                 "a mask array cannot itself have a mask "
@@ -323,13 +325,20 @@ PyArray_SetMaskObject(PyArrayObject *arr, PyObject *obj)
     }
     if (true_count == 0) {
         /* All-False: canonicalize to NULL rather than attach a no-op mask. */
+        if (fa->mask != NULL) {
+            PyArray_CLEARFLAGS((PyArrayObject *)fa->mask, NPY_ARRAY_IS_MASK);
+        }
         Py_CLEAR(fa->mask);
         Py_DECREF(obj);
         return 0;
     }
 
+    if (fa->mask != NULL) {
+        PyArray_CLEARFLAGS((PyArrayObject *)fa->mask, NPY_ARRAY_IS_MASK);
+    }
     Py_CLEAR(fa->mask);
     fa->mask = obj;
+    PyArray_ENABLEFLAGS(mask_arr, NPY_ARRAY_IS_MASK);
 
     return 0;
 }

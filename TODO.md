@@ -20,11 +20,15 @@ inside the phase's checklist, so drift is easy to spot at a glance:
 | 0 — baseline (no code changes) | 14810 passed, 17 skipped, 12 deselected | 106 passed | 14916 passed, 17 skipped, 12 deselected | — |
 | 1 — `mask` field added | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
 | 2 — copy/view/reshape/sort mask propagation | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
+| 3 — ufunc dispatch (arithmetic/trig/comparisons) | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
 below). New masked-path behavior gets its own dedicated suite instead of a
-row here: `numpy/_core/tests/test_mask.py` (26 tests as of phase 2).
+row here: `numpy/_core/tests/test_mask.py` (40 tests as of phase 3). Phase 3
+also reran `test_umath.py` + `test_ufunc.py` (the phase-3 baseline files from
+the mapping table below) as an additional no-mask regression check: 5615
+passed, 60 skipped, 7 xfailed, all pre-existing (not new).
 
 ## Scope: which problem this solves
 
@@ -64,14 +68,25 @@ interfere with each other.
   slices/transposes/broadcasts the mask the same way, no custom bit-stride
   logic needed.
 - Invariant: `mask->mask` must always be `NULL` (no masked masks) — enforced
-  structurally, not by checking the incoming mask's state at attach time: **an
-  array of dtype `bool` can never itself carry a mask**, full stop, regardless
-  of whether it is currently in use as someone else's mask. A plain
-  "reject if `obj->mask != NULL` at attach" check has a point-in-time hole:
-  nothing stops attaching a mask to `obj` *after* it's already serving as
-  another array's mask (`arr.mask.mask = x` would still nest). Enforced in
-  `PyArray_SetMaskObject` by refusing whenever the *receiver* (`arr`, not just
-  the incoming `obj`) has dtype `bool` — see phase 2 checklist.
+  by usage-tracking, not by dtype. An earlier version of this fix tried "an
+  array of dtype `bool` can never itself carry a mask" as a structural
+  shortcut, but that's actually wrong: mask arrays are always bool, but not
+  every bool array *is* a mask — comparison ufuncs (`a < b`, phase 3) produce
+  ordinary bool arrays that must still be allowed to carry their own mask
+  when they aren't currently serving as anyone else's. The real invariant is
+  usage-based: an array cannot receive a mask *while it is currently in use
+  as some other array's mask*, tracked via the internal `NPY_ARRAY_IS_MASK`
+  flag (`arrayobject.h`), set when attached and cleared when detached or
+  replaced. A plain "reject if `obj->mask != NULL` at attach" check (checking
+  only the incoming candidate) has a point-in-time hole: nothing stops
+  attaching a mask to `obj` *after* it's already serving as another array's
+  mask (`arr.mask.mask = x` would still nest). Checking the flag on the
+  *receiver* (`arr`, not just the incoming `obj`) at attach time closes that
+  hole — see phase 2/3 checklists. Not refcounted: sharing the exact same
+  mask object (by identity, not via `.view()` of it) across more than one
+  owner is an accepted edge case where detaching from one owner clears the
+  flag even if another owner still references it — a niche, undesigned-for
+  usage, not the `.view()`-based per-owner sharing phase 2 actually relies on.
 - Refcounting on `mask` follows the existing convention for `base`
   (`Py_INCREF`/`Py_DECREF` at the same points).
 - **No mask (`mask == NULL`)**: goes through the exact current code path,
@@ -269,14 +284,18 @@ tests from scratch.
     exist for real use, not just a missing-feature gap — hence jumping the
     queue ahead of ufunc dispatch.
   - [x] Hardened `PyArray_SetMaskObject`'s invariant enforcement
-        (`arrayobject.c`): refuses attaching *any* mask to a bool-dtype
-        receiver (checked on `arr`, not just the incoming object's own
-        `mask` field) — closes the point-in-time hole where
+        (`arrayobject.c`): refuses attaching a mask to a receiver currently
+        flagged `NPY_ARRAY_IS_MASK` (checked on `arr`, not just the incoming
+        object's own `mask` field) — closes the point-in-time hole where
         `arr.mask.mask = x` could nest a mask after the initial attach
-        already passed. Also canonicalizes an all-False incoming mask to
-        `NULL` via `PyArray_CountNonzero` on assignment (see "Unmasked
-        representation" above) — a one-time scan paid only here, not by
-        internal propagation.
+        already passed. **Revised in phase 3**: the first version of this
+        used a blanket "bool-dtype arrays can never carry a mask" rule
+        instead of a usage flag, which turned out to be wrong — comparison
+        ufuncs produce bool arrays that must still be maskable; see phase 3
+        checklist and the corrected "Settled design decisions" entry. Also
+        canonicalizes an all-False incoming mask to `NULL` via
+        `PyArray_CountNonzero` on assignment (see "Unmasked representation"
+        above) — a one-time scan paid only here, not by internal propagation.
   - [x] `copy()`/`view()`/`a[:]`: propagated at a small number of choke
         points rather than duplicated per call site —
         `PyArray_NewCopy` (`convert.c`) deep-copies the mask for every
@@ -328,12 +347,57 @@ tests from scratch.
         mapping, plus a duplicate-value case that only checks the
         preserved mask count, since tied elements have no guaranteed
         relative order under a non-stable sort).
-- [ ] **3 — Ufunc dispatch (arithmetic, trig, comparisons)**
-  - [ ] `umath/ufunc_object.c` — central `if (has_mask)` branch point
-  - [ ] `umath/dispatching.c` — masked loop variant selection (NEP 43)
-  - [ ] `umath/loops*.c.src` — masked-AVX512 loop + strided fallback loop,
-        starting with binary arithmetic on `float64`/`int64` as proof of
-        concept before generalizing
+- [x] **3 — Ufunc dispatch (arithmetic, trig, comparisons)**
+  - [x] **Correctness-first, black-box wrapper — not the planned AVX-512
+        masked loop.** Like phase 2's sort/partition fallback, the real
+        masked-SIMD loop work (`umath/dispatching.c` NEP 43 variant
+        selection, `umath/loops*.c.src` masked/strided loops) is a
+        performance project of its own, deferred to a later phase. Instead,
+        `ufunc_generic_vectorcall` (`umath/ufunc_object.c`) — the single
+        choke point *every* ufunc call and operator overload goes through
+        (`a + b` vectorcalls the `add` ufunc object exactly like
+        `np.add(a, b)`) — wraps the existing, untouched
+        `ufunc_generic_fastcall`: if none of the inputs carry a mask, the
+        original call happens with no other change (matching "no-mask path
+        byte-identical" exactly); if any input is masked, the same call
+        still runs unmodified to get the real, fully-computed result (mask
+        never affects computation), then a new `_propagate_ufunc_result_mask`
+        OR-combines the input masks via the existing `bitwise_or`/`PyNumber_Or`
+        machinery (broadcasting handled by that same machinery, not
+        hand-rolled), broadcasts the combined mask up to each output's exact
+        shape (OR against an explicit same-shape zero array), and attaches
+        it via `PyArray_SetMaskObject`. Handles multi-output ufuncs
+        (`divmod`) and `out=`/in-place operators (`+=`) — the output object
+        already gets fully overwritten either way, so replacing its mask
+        the same way is safe. gufuncs (`ufunc->core_enabled`, e.g. `matmul`)
+        are excluded (phase 9).
+  - [x] **Found and fixed a real bug in phase 2's invariant while
+        implementing this**: comparison ufuncs (`a < b`) produce bool-dtype
+        output, but phase 2's "hardened" invariant was a blanket "no bool
+        array can ever carry a mask" — which would have made comparison
+        results permanently unmaskable, contradicting phase 3's own scope.
+        Replaced with proper usage-tracking: a new internal
+        `NPY_ARRAY_IS_MASK` flag (`multiarray/arrayobject.h`), set on an
+        array while it's attached as *some* array's mask and cleared on
+        detach/replace; `PyArray_SetMaskObject` now refuses attaching a
+        mask to a receiver that currently has this flag set (not "is dtype
+        bool"). See the corrected "Settled design decisions" entry for the
+        full reasoning and the accepted non-refcounted-flag limitation.
+  - [x] Known, documented gaps (not phase-3 blockers): `where=` (partial
+        writes) skips mask propagation entirely rather than risk getting
+        stale-element masking wrong; a 0-d result that decays to a plain
+        Python/numpy scalar can't carry a mask (scalar types have no
+        `mask` field) — that piece of mask information is dropped for that
+        call.
+  - [x] Regression tests: 14 new cases in `numpy/_core/tests/test_mask.py`
+        (`TestMaskUfuncPropagation`) covering binary/unary/trig/comparison
+        OR-propagation, one-sided-mask broadcasting, operator-vs-`np.add`
+        equivalence, no-mask-stays-unmasked, in-place (`+=`), `out=`,
+        multi-output (`divmod`), the `where=` gap, and result-mask
+        independence (mutating a result's mask must not affect an input's).
+        Reran `test_umath.py`/`test_ufunc.py` (this phase's baseline files)
+        as well as the standing `test_multiarray.py`/`test_indexing.py`
+        baseline — all identical to pre-phase-3, see the table above.
 - [ ] **4 — Reductions / accumulate**
   - [ ] `umath/reduction.c`, `umath/ufunc_object.c`
         (`reduce`/`accumulate`/`reduceat`/`outer`/`at`)
