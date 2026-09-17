@@ -1320,6 +1320,19 @@ array_item_asarray(PyArrayObject *self, npy_intp i)
                             indices, 2, 0) < 0) {
         return NULL;
     }
+    if (PyArray_MASK(self) != NULL) {
+        PyArrayObject *mask_view = NULL;
+        if (get_view_from_index((PyArrayObject *)PyArray_MASK(self),
+                                &mask_view, indices, 2, 1) < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        if (PyArray_SetMaskObject((PyArrayObject *)result,
+                                  (PyObject *)mask_view) < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+    }
     return result;
 }
 
@@ -1559,6 +1572,31 @@ array_subscript(PyArrayObject *self, PyObject *op)
         if (get_view_from_index(self, &view, indices, index_num,
                                 (index_type & HAS_FANCY)) < 0) {
             goto finish;
+        }
+
+        /*
+         * Basic indexing (no fancy component): propagate the mask by
+         * replaying the exact same parsed indices against `self`'s mask,
+         * which has by invariant the same shape as `self` -- this is not a
+         * fancy index, only slices/integers/newaxis/ellipsis, so the same
+         * `indices` array that was valid against `self` is valid against
+         * the mask too (see "Mask semantics and propagation" in TODO.md).
+         * When `HAS_FANCY` is also set, `view` is just an internal subspace
+         * view for further fancy-index processing, not the final result --
+         * mask propagation for the fancy case is phase 6, not here.
+         */
+        if (!(index_type & HAS_FANCY) && PyArray_MASK(self) != NULL) {
+            PyArrayObject *mask_view = NULL;
+            if (get_view_from_index(
+                        (PyArrayObject *)PyArray_MASK(self), &mask_view,
+                        indices, index_num, 1) < 0) {
+                Py_CLEAR(view);
+                goto finish;
+            }
+            if (PyArray_SetMaskObject(view, (PyObject *)mask_view) < 0) {
+                Py_CLEAR(view);
+                goto finish;
+            }
         }
 
         /*

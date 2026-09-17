@@ -537,6 +537,26 @@ PyArray_NewCopy(PyArrayObject *obj, NPY_ORDER order)
         return NULL;
     }
 
+    /*
+     * Deep-copy the mask too, into its own independent buffer -- unlike a
+     * view, a copy must not share any memory with the original (see "Mask
+     * semantics and propagation" in TODO.md). This is also the fallback
+     * `shape.c` uses when a reshape can't be expressed as a view, so it
+     * covers that case for free.
+     */
+    if (PyArray_MASK(obj) != NULL) {
+        PyObject *mask_copy = PyArray_NewCopy(
+                (PyArrayObject *)PyArray_MASK(obj), order);
+        if (mask_copy == NULL) {
+            Py_DECREF(ret);
+            return NULL;
+        }
+        if (PyArray_SetMaskObject(ret, mask_copy) < 0) {
+            Py_DECREF(ret);
+            return NULL;
+        }
+    }
+
     return (PyObject *)ret;
 }
 
@@ -689,10 +709,34 @@ PyArray_View(PyArrayObject *self, PyArray_Descr *type, PyTypeObject *pytype)
     if (type == NULL) {
         /* No dtype change. */
         Py_INCREF(dtype);
-        return PyArray_NewFromDescr_int(
+        PyObject *view = PyArray_NewFromDescr_int(
                 subtype, dtype, nd, dims, strides, PyArray_DATA(self),
                 flags, (PyObject *)self, (PyObject *)self,
                 _NPY_ARRAY_ENSURE_DTYPE_IDENTITY);
+        if (view == NULL) {
+            return NULL;
+        }
+        /*
+         * Propagate the mask: a plain view of the whole mask buffer,
+         * sharing memory with `self`'s mask rather than copying it (see
+         * "Mask semantics and propagation" in TODO.md). Dtype-changing
+         * views (the paths below) don't propagate the mask -- changing
+         * dtype can change the element count/shape, and there's no
+         * obviously-correct mask reshape for that case yet.
+         */
+        if (PyArray_MASK(self) != NULL) {
+            PyObject *mask_view = PyArray_View(
+                    (PyArrayObject *)PyArray_MASK(self), NULL, &PyArray_Type);
+            if (mask_view == NULL) {
+                Py_DECREF(view);
+                return NULL;
+            }
+            if (PyArray_SetMaskObject((PyArrayObject *)view, mask_view) < 0) {
+                Py_DECREF(view);
+                return NULL;
+            }
+        }
+        return view;
     }
 
     /*

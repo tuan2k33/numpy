@@ -1763,8 +1763,14 @@ PyArray_Partition(PyArrayObject *op, PyArrayObject * ktharray, int axis,
     }
 
     method = NPY_DT_SLOTS(NPY_DTYPE(PyArray_DESCR(op)))->part_meth;
-    if (method == NULL) {
-        /* Use sorting, slower but equivalent */
+    if (method == NULL || PyArray_MASK(op) != NULL) {
+        /*
+         * Use sorting, slower but equivalent -- also the only masked-aware
+         * path: no masked-aware partition algorithm exists (see
+         * `_sort_with_mask` above), and a full sort is a valid, if
+         * asymptotically slower, partition. Correctness first -- see
+         * TODO.md phase 2/12 for the deferred O(n) masked partition.
+         */
         Py_DECREF(kthrvl);
         return PyArray_Sort(op, axis, (NPY_SORTKIND)which);
     }
@@ -3290,6 +3296,127 @@ PyArray_MultiIndexSetItem(PyArrayObject *self, const npy_intp *multi_index,
 }
 
 
+/*
+ * Correctness-first fallback for sorting a masked array in place: computes
+ * an argsort permutation (ordering is defined by the real underlying
+ * values -- mask never affects comparison, see "Mask semantics and
+ * propagation" in TODO.md), then reorders both `op` and its mask by that
+ * permutation, one line along `axis` at a time.
+ *
+ * This is deliberately NOT the in-place, no-extra-allocation algorithm
+ * `_new_sortlike` uses: threading a companion mask buffer through every
+ * swap of every sort backend (quicksort/timsort/heapsort, per dtype, in
+ * npysort's *.c.src files) is a much larger change, deferred to a later
+ * performance pass (see TODO.md phase 2/12). Instead this reuses existing,
+ * already-correct `PyArray_TakeFrom`/`PyArray_CopyInto` machinery per
+ * line, which already handles every dtype's refcounting/byteswap/
+ * alignment requirements -- avoiding a hand-rolled element copy that would
+ * need to reimplement all of that correctly for e.g. object arrays.
+ *
+ * Returns 0 on success, -1 on failure (matching PyArray_Sort's contract).
+ */
+static int
+_sort_with_mask(PyArrayObject *op, int axis, NPY_SORTKIND sortkind)
+{
+    PyArrayObject *mask = (PyArrayObject *)PyArray_MASK(op);
+    npy_intp N = PyArray_DIM(op, axis);
+
+    if (N <= 1 || PyArray_SIZE(op) == 0) {
+        return 0;
+    }
+
+    PyObject *idx_obj = PyArray_ArgSort(op, axis, sortkind);
+    if (idx_obj == NULL) {
+        return -1;
+    }
+    PyArrayObject *idx = (PyArrayObject *)idx_obj;
+
+    int axis_op = axis, axis_mask = axis, axis_idx = axis;
+    PyArrayIterObject *it_op = (PyArrayIterObject *)
+            PyArray_IterAllButAxis((PyObject *)op, &axis_op);
+    PyArrayIterObject *it_mask = (PyArrayIterObject *)
+            PyArray_IterAllButAxis((PyObject *)mask, &axis_mask);
+    PyArrayIterObject *it_idx = (PyArrayIterObject *)
+            PyArray_IterAllButAxis((PyObject *)idx, &axis_idx);
+
+    int ret = -1;
+    if (it_op == NULL || it_mask == NULL || it_idx == NULL) {
+        goto finish;
+    }
+
+    npy_intp op_stride = PyArray_STRIDE(op, axis_op);
+    npy_intp mask_stride = PyArray_STRIDE(mask, axis_mask);
+    npy_intp idx_stride = PyArray_STRIDE(idx, axis_idx);
+
+    while (it_op->index < it_op->size) {
+        Py_INCREF(PyArray_DESCR(op));
+        PyArrayObject *op_line = (PyArrayObject *)PyArray_NewFromDescrAndBase(
+                &PyArray_Type, PyArray_DESCR(op), 1, &N, &op_stride,
+                it_op->dataptr, PyArray_FLAGS(op), NULL, (PyObject *)op);
+        if (op_line == NULL) {
+            goto finish;
+        }
+
+        Py_INCREF(PyArray_DESCR(mask));
+        PyArrayObject *mask_line = (PyArrayObject *)PyArray_NewFromDescrAndBase(
+                &PyArray_Type, PyArray_DESCR(mask), 1, &N, &mask_stride,
+                it_mask->dataptr, PyArray_FLAGS(mask), NULL, (PyObject *)mask);
+        if (mask_line == NULL) {
+            Py_DECREF(op_line);
+            goto finish;
+        }
+
+        Py_INCREF(PyArray_DESCR(idx));
+        PyArrayObject *idx_line = (PyArrayObject *)PyArray_NewFromDescrAndBase(
+                &PyArray_Type, PyArray_DESCR(idx), 1, &N, &idx_stride,
+                it_idx->dataptr, PyArray_FLAGS(idx), NULL, (PyObject *)idx);
+        if (idx_line == NULL) {
+            Py_DECREF(op_line);
+            Py_DECREF(mask_line);
+            goto finish;
+        }
+
+        PyObject *sorted_op = PyArray_TakeFrom(
+                op_line, (PyObject *)idx_line, 0, NULL, NPY_RAISE);
+        PyObject *sorted_mask = NULL;
+        if (sorted_op != NULL) {
+            sorted_mask = PyArray_TakeFrom(
+                    mask_line, (PyObject *)idx_line, 0, NULL, NPY_RAISE);
+        }
+
+        int line_ok = 0;
+        if (sorted_op != NULL && sorted_mask != NULL) {
+            line_ok = (PyArray_CopyInto(op_line, (PyArrayObject *)sorted_op) == 0)
+                    && (PyArray_CopyInto(mask_line,
+                                         (PyArrayObject *)sorted_mask) == 0);
+        }
+
+        Py_XDECREF(sorted_op);
+        Py_XDECREF(sorted_mask);
+        Py_DECREF(op_line);
+        Py_DECREF(mask_line);
+        Py_DECREF(idx_line);
+
+        if (!line_ok) {
+            goto finish;
+        }
+
+        PyArray_ITER_NEXT(it_op);
+        PyArray_ITER_NEXT(it_mask);
+        PyArray_ITER_NEXT(it_idx);
+    }
+
+    ret = 0;
+
+finish:
+    Py_XDECREF(it_op);
+    Py_XDECREF(it_mask);
+    Py_XDECREF(it_idx);
+    Py_DECREF(idx);
+    return ret;
+}
+
+
 /*NUMPY_API
  * Sort an array in-place with extended parameters
  */
@@ -3315,6 +3442,10 @@ PyArray_Sort(PyArrayObject *op, int axis, NPY_SORTKIND flags)
 
     if (PyArray_FailUnlessWriteable(op, "sort array") < 0) {
         return -1;
+    }
+
+    if (PyArray_MASK(op) != NULL) {
+        return _sort_with_mask(op, axis, flags);
     }
 
     // Zero the NPY_HEAPSORT bit, maps NPY_HEAPSORT to NPY_QUICKSORT

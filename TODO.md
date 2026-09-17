@@ -19,10 +19,12 @@ inside the phase's checklist, so drift is easy to spot at a glance:
 |---|---|---|---|---|
 | 0 — baseline (no code changes) | 14810 passed, 17 skipped, 12 deselected | 106 passed | 14916 passed, 17 skipped, 12 deselected | — |
 | 1 — `mask` field added | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
+| 2 — copy/view/reshape/sort mask propagation | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
-below).
+below). New masked-path behavior gets its own dedicated suite instead of a
+row here: `numpy/_core/tests/test_mask.py` (26 tests as of phase 2).
 
 ## Scope: which problem this solves
 
@@ -61,8 +63,15 @@ interfere with each other.
   machinery for free — slicing, transposing, broadcasting the parent array
   slices/transposes/broadcasts the mask the same way, no custom bit-stride
   logic needed.
-- Invariant: `mask->mask` must always be `NULL` (no masked masks). Enforce at
-  every point a mask gets attached.
+- Invariant: `mask->mask` must always be `NULL` (no masked masks) — enforced
+  structurally, not by checking the incoming mask's state at attach time: **an
+  array of dtype `bool` can never itself carry a mask**, full stop, regardless
+  of whether it is currently in use as someone else's mask. A plain
+  "reject if `obj->mask != NULL` at attach" check has a point-in-time hole:
+  nothing stops attaching a mask to `obj` *after* it's already serving as
+  another array's mask (`arr.mask.mask = x` would still nest). Enforced in
+  `PyArray_SetMaskObject` by refusing whenever the *receiver* (`arr`, not just
+  the incoming `obj`) has dtype `bool` — see phase 2 checklist.
 - Refcounting on `mask` follows the existing convention for `base`
   (`Py_INCREF`/`Py_DECREF` at the same points).
 - **No mask (`mask == NULL`)**: goes through the exact current code path,
@@ -82,6 +91,59 @@ interfere with each other.
 - Reuse numpy's existing `NPY_CPU_DISPATCH` / universal SIMD infra
   (`numpy/_core/src/common/simd/`) to add the AVX-512 masked variant per loop
   rather than building runtime CPU dispatch from scratch.
+
+## Mask semantics and propagation
+
+- mask == NULL means unmasked / ordinary ndarray.
+- mask[i] == False means visible; mask[i] == True means hidden.
+- Mask affects observability, not computation: underlying data is always
+  computed exactly as in normal NumPy.
+- Every non-NULL mask is a plain bool ndarray with exactly the same shape
+  as its owner and mask == NULL itself.
+- Elementwise operations propagate masks by OR after normal NumPy
+  broadcasting.
+- Views transform the mask using exactly the same indexing/striding
+  transformation as the data; masks are not eagerly copied.
+- Operations that permute/select elements must apply the same permutation
+  or index mapping to the mask.
+- Reductions preserve existing NumPy output shape/type semantics. Their
+  output mask is the OR reduction of the masks of all input elements
+  contributing to each output element.
+- If all contributing inputs are unmasked, the result mask remains NULL.
+- Scalar results preserve their normal NumPy scalar type; masked scalar
+  results carry mask state rather than becoming None.
+- Mask propagation is separate from output/observability policy. Data is
+  fully computed; masked values are suppressed only at defined output
+  boundaries.
+- No operation may change ndarray shape, dtype, broadcasting rules, or
+  ordinary unmasked usage merely because masks are enabled.
+- `.copy()` deep-copies the mask into an independent buffer, exactly like it
+  deep-copies data; `.view()`/basic slicing instead transform the mask via
+  the identical indexing/striding operation applied to data, sharing the
+  underlying mask buffer (consistent with "not eagerly copied" below). Two
+  independent views can still carry independently-assigned masks — rebinding
+  `view.mask = new_arr` only affects that view — while in-place mutation of a
+  *shared* mask buffer through one view is visible through any other view
+  sharing it, mirroring ordinary data-view semantics.
+
+## Unmasked representation
+
+- A newly created ordinary ndarray has `mask == NULL`.
+- `mask == NULL` is the canonical representation of an entirely unmasked
+  array; it is semantically equivalent to an all-False mask, but an
+  all-False mask must never be materialized merely to represent the
+  unmasked state.
+- External mask assignment (`arr.mask = m`, `PyArray_SetMaskObject`) must
+  canonicalize an all-False `m` down to `NULL` — a one-time scan cost paid
+  at assignment, not a maintained invariant re-checked per-op.
+- Internal mask propagation (view/copy/elementwise/reduction results) should
+  preserve `NULL` whenever the result is provably unmasked from its inputs'
+  `NULL`-ness alone, and should avoid a full-mask scan solely to canonicalize
+  an already-non-NULL mask that happens to be all-False — only the external
+  assignment path pays that scan cost.
+- Operations whose inputs all have `mask == NULL` must produce
+  `mask == NULL`.
+- `mask == NULL` is therefore both a semantic state and the fast path.
 
 ## Goal: no rebuild required for plain-array users
 
@@ -191,7 +253,7 @@ tests from scratch.
         attach-then-dealloc-without-clearing, and mask replacement dropping
         the old mask's reference. RSS flat (0.0 MB delta) over 500000
         alternating attach/clear/dealloc iterations.
-- [ ] **2 — Basic ops: mask propagation + reorder correctness (promoted
+- [x] **2 — Basic ops: mask propagation + reorder correctness (promoted
         ahead of dispatch — found by manually probing `copy`/`view`/
         `reshape`/`sort`/`partition` right after phase 1 landed)**
   - Current (untouched since phase 1) behavior, verified empirically:
@@ -206,21 +268,66 @@ tests from scratch.
     there moved to indices `[0,1]`). This is a correctness bug once masks
     exist for real use, not just a missing-feature gap — hence jumping the
     queue ahead of ufunc dispatch.
-  - [ ] `copy()`/`view()`/`a[:]` (`multiarray/ctors.c`, `mapping.c` basic
-        indexing path): propagate the parent's mask to the new array by
-        default (deep-copy the mask array for `copy()`; for a view, decide
-        share-vs-copy against the phase-4 "two views, different masks over
-        one buffer" test from the Scope section — a plain `.view()` with no
-        new mask argument should probably still see the parent's
-        redaction, not lose it)
-  - [ ] `reshape()`/`ravel()`/`squeeze()` (`multiarray/shape.c`): reshape
-        the mask identically alongside data, same shape transform applied
-        to both
-  - [ ] `sort()`/`argsort()`/`partition()`/`argpartition()`
-        (`npysort/*.c.src`, `multiarray/item_selection.c`): must permute
-        `mask` by the exact same permutation applied to `data` — not leave
-        it stationary. Add a regression test asserting mask tracks value
-        identity through a sort, mirroring the `[3,1,4,1,5]` case above.
+  - [x] Hardened `PyArray_SetMaskObject`'s invariant enforcement
+        (`arrayobject.c`): refuses attaching *any* mask to a bool-dtype
+        receiver (checked on `arr`, not just the incoming object's own
+        `mask` field) — closes the point-in-time hole where
+        `arr.mask.mask = x` could nest a mask after the initial attach
+        already passed. Also canonicalizes an all-False incoming mask to
+        `NULL` via `PyArray_CountNonzero` on assignment (see "Unmasked
+        representation" above) — a one-time scan paid only here, not by
+        internal propagation.
+  - [x] `copy()`/`view()`/`a[:]`: propagated at a small number of choke
+        points rather than duplicated per call site —
+        `PyArray_NewCopy` (`convert.c`) deep-copies the mask for every
+        `.copy()` call site (and for `shape.c`'s reshape-needs-a-copy
+        fallback, for free); `PyArray_View`'s no-dtype-change path
+        (`convert.c`) attaches a *view* of the mask (shares the buffer,
+        not eagerly copied, matching "Mask semantics and propagation"
+        above — confirmed two views over one buffer can carry
+        independently-*reassigned* masks while still seeing shared
+        in-place mask mutations, exactly like data sharing); basic
+        indexing (slices/integers/newaxis/ellipsis, no fancy component)
+        in `mapping.c`'s `array_subscript`/`array_item_asarray` replays
+        the identical parsed indices against the mask. Dtype-changing
+        `.view(new_dtype)` does not propagate the mask yet (element
+        count/shape can change under a dtype view; no obviously-correct
+        mask reshape for that case) — noted as a follow-up nuance, not a
+        phase-2 blocker. Fancy/boolean indexing is still phase 6.
+  - [x] `reshape()`/`ravel()`/`squeeze()` (`shape.c`): `_reshape_with_copy_arg`
+        recurses `PyArray_Newshape` onto the mask itself (reusing its own
+        view-if-possible/copy-if-needed logic rather than re-deriving
+        stride math); `PyArray_Ravel`'s contiguous-view fast path and its
+        `PyArray_Flatten` fallback each recurse into themselves on the
+        mask; `PyArray_Squeeze`/`PyArray_SqueezeSelected` call
+        `PyArray_RemoveAxesInPlace` on the mask with the same axis flags
+        right after doing so for the data.
+  - [x] `sort()`/`partition()` (`item_selection.c`): **correctness-first
+        fallback, not the true in-place algorithm.** New
+        `_sort_with_mask` computes an argsort permutation (ordering is
+        defined by the real values — mask never affects comparison) and
+        replays it onto both the data and the mask, one line along `axis`
+        at a time, via existing `PyArray_TakeFrom`/`PyArray_CopyInto`
+        (so every dtype's refcounting/byteswap/alignment is already
+        handled correctly, no hand-rolled element copy). `PyArray_Sort`
+        dispatches to it whenever `PyArray_MASK(op) != NULL`;
+        `PyArray_Partition` falls back to a full `PyArray_Sort` when
+        masked (a sort is a valid, if asymptotically slower, partition).
+        This sacrifices sort's in-place no-extra-allocation property and
+        partition's O(n) advantage when masked — threading a companion
+        mask buffer through every swap of every backend
+        (quicksort/timsort/heapsort × dtype in `npysort/*.c.src`) is a
+        real performance project, deferred to phase 12/13, not required
+        for phase 2's correctness goal. `argsort()`/`argpartition()`
+        need no changes: they return an index array, not a masked array.
+  - [x] Regression tests: `numpy/_core/tests/test_mask.py` (new file) —
+        invariant/canonicalization tests, copy/view/slice mask
+        propagation (including the shared-vs-independent-buffer
+        distinction), reshape/ravel/squeeze, and the sort/partition
+        mask-permutation cases (distinct-value arrays for an unambiguous
+        mapping, plus a duplicate-value case that only checks the
+        preserved mask count, since tied elements have no guaranteed
+        relative order under a non-stable sort).
 - [ ] **3 — Ufunc dispatch (arithmetic, trig, comparisons)**
   - [ ] `umath/ufunc_object.c` — central `if (has_mask)` branch point
   - [ ] `umath/dispatching.c` — masked loop variant selection (NEP 43)

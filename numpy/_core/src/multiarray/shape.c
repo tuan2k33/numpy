@@ -11,6 +11,7 @@
 
 #include "npy_config.h"
 #include "arraywrap.h"
+#include "arrayobject.h"
 #include "ctors.h"
 #include "shape.h"
 #include "npy_static_data.h" /* for interned strings */
@@ -331,6 +332,25 @@ _reshape_with_copy_arg(PyArrayObject *array, PyArray_Dims *newdims,
             ndim, dimensions, strides, PyArray_DATA(array),
             flags, (PyObject *)array, (PyObject *)array,
             _NPY_ARRAY_ENSURE_DTYPE_IDENTITY);
+    if (ret != NULL && PyArray_MASK(array) != NULL) {
+        /*
+         * Reshape the mask the same way, by recursing into this same
+         * reshape machinery instead of re-deriving stride math for it --
+         * `newdims` has already had any `-1` placeholder resolved by
+         * `_fix_unknown_dimension` above, and the mask has the same
+         * element count as `array` by invariant, so it takes the same
+         * view-if-possible/copy-if-needed path independently of whether
+         * the mask's own memory layout happens to match `array`'s.
+         */
+        PyObject *mask_reshaped = PyArray_Newshape(
+                (PyArrayObject *)PyArray_MASK(array), newdims, order);
+        if (mask_reshaped == NULL) {
+            Py_CLEAR(ret);
+        }
+        else if (PyArray_SetMaskObject(ret, mask_reshaped) < 0) {
+            Py_CLEAR(ret);
+        }
+    }
     Py_DECREF(array);
     return (PyObject *)ret;
 }
@@ -570,6 +590,15 @@ PyArray_Squeeze(PyArrayObject *self)
     }
 
     PyArray_RemoveAxesInPlace(ret, unit_dims);
+    /*
+     * `PyArray_View` above already gave `ret` a full (unsqueezed) view of
+     * self's mask; `unit_dims` was validated against self's shape, which
+     * the mask shares by invariant, so the same flags remove the same
+     * axes from the mask in lockstep, keeping their shapes in sync.
+     */
+    if (PyArray_MASK(ret) != NULL) {
+        PyArray_RemoveAxesInPlace((PyArrayObject *)PyArray_MASK(ret), unit_dims);
+    }
 
     /*
      * If self isn't not a base class ndarray, call its
@@ -626,6 +655,9 @@ PyArray_SqueezeSelected(PyArrayObject *self, npy_bool *axis_flags)
     }
 
     PyArray_RemoveAxesInPlace(ret, axis_flags);
+    if (PyArray_MASK(ret) != NULL) {
+        PyArray_RemoveAxesInPlace((PyArrayObject *)PyArray_MASK(ret), axis_flags);
+    }
 
     /*
      * If self isn't not a base class ndarray, call its
@@ -968,14 +1000,56 @@ PyArray_Ravel(PyArrayObject *arr, NPY_ORDER order)
             val[0] = PyArray_SIZE(arr);
 
             Py_INCREF(PyArray_DESCR(arr));
-            return PyArray_NewFromDescrAndBase(
+            PyObject *view = PyArray_NewFromDescrAndBase(
                     Py_TYPE(arr), PyArray_DESCR(arr),
                     1, val, &stride, PyArray_BYTES(arr),
                     PyArray_FLAGS(arr), (PyObject *)arr, (PyObject *)arr);
+            if (view == NULL) {
+                return NULL;
+            }
+            /*
+             * Recurse into `PyArray_Ravel` on the mask itself (same
+             * resolved `order`) rather than assuming its memory layout
+             * mirrors `arr`'s -- it independently picks the view or
+             * copy-then-flatten path that's actually correct for the
+             * mask's own strides.
+             */
+            if (PyArray_MASK(arr) != NULL) {
+                PyObject *mask_raveled = PyArray_Ravel(
+                        (PyArrayObject *)PyArray_MASK(arr), order);
+                if (mask_raveled == NULL ||
+                        PyArray_SetMaskObject((PyArrayObject *)view,
+                                              mask_raveled) < 0) {
+                    Py_DECREF(view);
+                    return NULL;
+                }
+            }
+            return view;
         }
     }
 
-    return PyArray_Flatten(arr, order);
+    {
+        PyObject *flat = PyArray_Flatten(arr, order);
+        if (flat == NULL) {
+            return NULL;
+        }
+        if (PyArray_MASK(arr) != NULL) {
+            /*
+             * `PyArray_Flatten` always makes an independent copy (never a
+             * view), so flatten the mask the same way with the same
+             * `order` -- this reproduces the identical element
+             * permutation `PyArray_CopyAsFlat` used for the data.
+             */
+            PyObject *mask_flat = PyArray_Flatten(
+                    (PyArrayObject *)PyArray_MASK(arr), order);
+            if (mask_flat == NULL ||
+                    PyArray_SetMaskObject((PyArrayObject *)flat, mask_flat) < 0) {
+                Py_DECREF(flat);
+                return NULL;
+            }
+        }
+        return flat;
+    }
 }
 
 /*NUMPY_API
