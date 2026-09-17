@@ -9,6 +9,21 @@ branches. Track upstream and rebase periodically rather than diverging long-term
 
 - [ ] Pull from `origin/main` every day and before every push — this is a long-running fork of a fast-moving codebase, drift compounds fast if skipped.
 
+## Regression baseline: Phase 0 vs. Phase 1
+
+`mask == NULL` must keep every existing code path byte-identical to
+upstream. Tracking the actual pass counts here after each phase, not just
+inside the phase's checklist, so drift is easy to spot at a glance:
+
+| Phase | `test_multiarray.py` | `test_indexing.py` | Combined total | Match previous row? |
+|---|---|---|---|---|
+| 0 — baseline (no code changes) | 14810 passed, 17 skipped, 12 deselected | 106 passed | 14916 passed, 17 skipped, 12 deselected | — |
+| 1 — `mask` field added | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
+
+Add one row per phase from here on, run against the same two files at
+minimum (more as later phases touch more test files per the mapping table
+below).
+
 ## Scope: which problem this solves
 
 Two different usecases get called "masked array" and demand different designs:
@@ -132,10 +147,11 @@ tests from scratch.
 
 ## Phases
 
-- [ ] **0 — Setup**
-  - [ ] New branch off `main` dedicated to this (don't reuse
-        `enh/mean-var-non-legacy-dtype`)
-  - [ ] Confirm build config / CI baseline against numpy `main`
+- [x] **0 — Setup**
+  - [x] New branch `refactor/ndarray-mask` off freshly-pulled `main`
+        (didn't reuse `enh/mean-var-non-legacy-dtype`)
+  - [x] Confirmed build config / baseline against numpy `main` — see the
+        "Regression baseline" table above (row 0)
 - [x] **1 — Struct & invariants** (done on `refactor/ndarray-mask`)
   - [x] Added `NPY_2_7_API_VERSION 0x00000017` (`numpyconfig.h`), bumped
         `C_API_VERSION` in `numpy/_core/meson.build` (header-only change,
@@ -159,9 +175,8 @@ tests from scratch.
         NULL` (the invariant), and shape mismatch. Not registered in
         `numpy_api.py` yet — internal-only until a later phase needs
         external callers.
-  - [x] Verified: `spin build` clean, then `spin test -- test_multiarray.py
-        test_indexing.py` → 14916 passed (== the Phase 0 baseline
-        14810 + 106), same skips — zero regression with `mask == NULL`.
+  - [x] Verified: `spin build` clean, zero regression — see the "Regression
+        baseline" table near the top of this file.
 - [ ] **2 — Ufunc dispatch (arithmetic, trig, comparisons)**
   - [ ] `umath/ufunc_object.c` — central `if (has_mask)` branch point
   - [ ] `umath/dispatching.c` — masked loop variant selection (NEP 43)
