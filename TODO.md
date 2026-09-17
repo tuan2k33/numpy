@@ -21,6 +21,7 @@ inside the phase's checklist, so drift is easy to spot at a glance:
 | 1 — `mask` field added | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
 | 2 — copy/view/reshape/sort mask propagation | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
 | 3 — ufunc dispatch (arithmetic/trig/comparisons) | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
+| 4 — reduce/accumulate/reduceat/outer/at + `where=` merge fix | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
@@ -268,9 +269,9 @@ tests from scratch.
         attach-then-dealloc-without-clearing, and mask replacement dropping
         the old mask's reference. RSS flat (0.0 MB delta) over 500000
         alternating attach/clear/dealloc iterations.
-- [x] **2 — Basic ops: mask propagation + reorder correctness (promoted
+- [x] **2 — Basic ops**: mask propagation + reorder correctness (promoted
         ahead of dispatch — found by manually probing `copy`/`view`/
-        `reshape`/`sort`/`partition` right after phase 1 landed)**
+        `reshape`/`sort`/`partition` right after phase 1 landed)
   - Current (untouched since phase 1) behavior, verified empirically:
     `copy()`/`view()`/`a[:]`/`reshape()` all **silently drop** the mask
     (new array's `mask` is `NULL`) — safe but wrong, and defeats the
@@ -383,29 +384,180 @@ tests from scratch.
         mask to a receiver that currently has this flag set (not "is dtype
         bool"). See the corrected "Settled design decisions" entry for the
         full reasoning and the accepted non-refcounted-flag limitation.
-  - [x] Known, documented gaps (not phase-3 blockers): `where=` (partial
-        writes) skips mask propagation entirely rather than risk getting
-        stale-element masking wrong; a 0-d result that decays to a plain
-        Python/numpy scalar can't carry a mask (scalar types have no
-        `mask` field) — that piece of mask information is dropped for that
-        call.
+  - [x] **Revised after phase 4's design discussion**: `where=` is no
+        longer a blanket skip. It's now treated as a *selective write* —
+        for both data and mask: `where=True` positions get the
+        propagated/OR-combined mask, `where=False` positions keep `out`'s
+        *old* mask (read directly off `PyArray_MASK(out)` after the call,
+        since the wrapped call never touches `.mask`, only data — no need
+        to snapshot it beforehand). Implemented via `merged =
+        PyArray_Where(where, new_mask, old_mask)`, reusing `np.where`'s own
+        broadcasting/selection instead of re-deriving the ufunc's
+        iteration topology by hand. This only has a principled "old mask"
+        when the caller passed a real `out=`; two narrower gaps remain:
+        `where=` with `out=None` (freshly allocated, `where=False`
+        positions are *uninitialized*, not "old, valid, differently-masked
+        data" — no principled old mask to merge with) and `where=`
+        combined with a multi-output ufunc (rare combination, not worth
+        the complexity yet) both still skip propagation entirely, same as
+        the original gap.
+  - [x] Other known, documented gaps (not phase-3 blockers): a 0-d result
+        that decays to a plain Python/numpy scalar can't carry a mask
+        (scalar types have no `mask` field) — that piece of mask
+        information is dropped for that call.
   - [x] Regression tests: 14 new cases in `numpy/_core/tests/test_mask.py`
         (`TestMaskUfuncPropagation`) covering binary/unary/trig/comparison
         OR-propagation, one-sided-mask broadcasting, operator-vs-`np.add`
         equivalence, no-mask-stays-unmasked, in-place (`+=`), `out=`,
-        multi-output (`divmod`), the `where=` gap, and result-mask
-        independence (mutating a result's mask must not affect an input's).
-        Reran `test_umath.py`/`test_ufunc.py` (this phase's baseline files)
-        as well as the standing `test_multiarray.py`/`test_indexing.py`
-        baseline — all identical to pre-phase-3, see the table above.
-- [ ] **4 — Reductions / accumulate**
-  - [ ] `umath/reduction.c`, `umath/ufunc_object.c`
-        (`reduce`/`accumulate`/`reduceat`/`outer`/`at`)
-  - [ ] `multiarray/calculation.c` (`.sum()`, `.mean()`, `.argmax()`...)
+        multi-output (`divmod`), the (then-blanket) `where=` gap, and
+        result-mask independence (mutating a result's mask must not affect
+        an input's). Reran `test_umath.py`/`test_ufunc.py` (this phase's
+        baseline files) as well as the standing `test_multiarray.py`/
+        `test_indexing.py` baseline — all identical to pre-phase-3, see the
+        table above. **Updated in phase 4** once the `where=` gap was
+        narrowed (see above): the old blanket-skip test was rewritten into
+        4 tests covering the `merge_where` selective-write behavior (with
+        and without a pre-existing `out` mask) and the two narrower
+        remaining gaps (`out=None`, multi-output).
+- [x] **4 — Reductions / accumulate**
+  - [x] **Convention (settled after design discussion): run the identical
+        reduce-like call again with `logical_or` substituted for the data
+        ufunc, on the mask(s) instead of the data**, rather than
+        hand-deriving mask combination per method — reuses each method's
+        own correct axis/shape/segment/repeated-index/identity-exclusion
+        logic instead of re-implementing it:
+        `add.reduce(x)`→`logical_or.reduce(x.mask)`,
+        `add.accumulate(x)`→`logical_or.accumulate(x.mask)` (cumulative
+        OR — position i has incorporated everything up to i),
+        `add.reduceat(x,ind)`→`logical_or.reduceat(x.mask,ind)` (OR within
+        each segment), `add.outer(a,b)`→`logical_or.outer(a.mask,b.mask)`
+        (outer's result shape is `a.shape+b.shape`, concatenation not
+        broadcasting, so phase 3's zeros-broadcast trick doesn't apply —
+        `outer()` itself already produces the right shape),
+        `add.at(x,idx,y)`→`logical_or.at(x.mask,idx,y.mask)` (repeated
+        indices accumulate correctly for free, since OR is
+        associative/commutative/idempotent regardless of order, same
+        reason `add.at` already handles repeats). `initial=NULL` is
+        deliberately passed for the mask reduce (not the caller's own
+        `initial`, a data identity, not a mask fact) so `logical_or`'s own
+        identity (`False`) applies — an identity-filled slot contributes
+        no real data and must never read as masked. Implemented in
+        `umath/ufunc_object.c`: `_propagate_reduce_mask` /
+        `_propagate_accumulate_mask` / `_propagate_reduceat_mask` (hooked
+        into `PyUFunc_GenericReduction`'s switch, right after each of
+        `PyUFunc_Reduce`/`Accumulate`/`Reduceat` computes `ret`),
+        `_propagate_outer_mask` (hooked into `ufunc_outer`),
+        `_propagate_at_mask` (hooked into `ufunc_at`, called directly
+        rather than through the Python-visible method, matching phase 3's
+        discipline of calling C API directly).
+  - [x] `where=` for `reduce` (the only one of the five that accepts it):
+        passed straight through unchanged to the mask's `logical_or.reduce`
+        call — since `reduce` always fully (re)writes every output
+        position regardless of `where=` (it only decides which *inputs*
+        feed the combine, not which *outputs* get written), there's no
+        "old mask to preserve" case here, unlike phase 3's elementwise
+        `where=` gap. An element `where` excludes is correctly excluded
+        from the mask combine too, for the same reason it's excluded from
+        the data combine.
+  - [x] Unary `.at()` (`ufunc->nin == 1`, e.g. `np.negative.at`) needs no
+        mask update at all — recomputing an element from itself introduces
+        no new masked information — so `_propagate_at_mask` is only called
+        when `ufunc->nin == 2`.
+  - [x] **`multiarray/calculation.c` needed zero changes** — traced every
+        function first: `.sum()`/`.prod()`/`.any()`/`.all()`/`.max()`/
+        `.min()` all route through `PyArray_GenericReduceFunction` →
+        `PyUFunc_Reduce`, so they inherit mask propagation automatically.
+        `.mean()` = `sum()` then `PyNumber_TrueDivide` by a plain Python
+        float (already mask-aware from phase 3) — also free. `.std()`/
+        `.var()` (`__New_PyArray_Std`) compose entirely from `PyArray_Mean`
+        + `PyNumber_Subtract`/`multiply` (phase-3 ufuncs) +
+        `PyArray_GenericReduceFunction(..., add)` (this phase's target) +
+        a scalar multiply + `sqrt` — also free, with a deliberate,
+        documented consequence: since `x - mean(x)` OR's every element's
+        mask with the mean's (already axis-wide) mask, **if any element in
+        an axis is masked, `std`/`var` for that *entire axis* reads
+        masked** — correct given variance mixes every element in the axis
+        together, not a bug.
+  - [x] `.argmax()`/`.argmin()` need no changes — like `argsort` (phase 2),
+        they return an index, not data, so the result carries no mask; and
+        the masked element must still fully participate in the comparison
+        (mask never affects computation) — confirmed by test, not a code
+        change.
+  - [x] Regression tests: 26 new cases in `numpy/_core/tests/test_mask.py`
+        (`TestMaskReduceLike`) covering reduce (OR-of-contributing,
+        axis-scoped, `where=`-exclusion, empty-slice-identity-not-masked,
+        full-reduction scalar-decay gap), the calculation.c free-inherit
+        confirmation (`sum`/`mean`/`max`/`min`/`any`/`all`), the
+        `std`/`var` whole-axis-spread behavior, `argmax`/`argmin`
+        mask-blind comparison, accumulate (cumulative OR), reduceat
+        (per-segment OR), outer (concatenated-shape OR, one-sided
+        broadcast), and `at` (touched-positions-only, second-operand
+        propagation, repeated-index accumulation, unary no-op, no-mask
+        fast path). Also fixed/extended 4 existing `TestMaskUfuncPropagation`
+        cases for the `where=` merge-semantics change (see phase 3 above).
+        Reran `test_umath.py`/`test_ufunc.py` (identical: 5615 passed, 60
+        skipped, 7 xfailed) and the standing `test_multiarray.py`/
+        `test_indexing.py` baseline (identical: 14916 passed, 17 skipped,
+        12 deselected — see the table above).
+  - [x] Leak-checked (RSS + refcount): RSS flat across 20000-iteration
+        loops for each of reduce/accumulate/reduceat/outer/at/where-merge;
+        refcount stable across 1000 repeated calls for the reduce path,
+        the `.at()` in-place-mutate-existing-mask path, and the
+        where-merge old-mask replacement path (old mask correctly
+        dereferenced, not leaked, when replaced).
 - [ ] **5 — Further view propagation** (basic reshape/view covered in
         phase 2 already; this is the rest)
   - [ ] `multiarray/getset.c` (`.T` and friends)
   - [ ] `multiarray/ctors.c` (`broadcast_to`)
+  - [ ] **Deferred phase-4 perf backlog** (from `BENCHMARKS.md`'s
+        same-build masked-vs-unmasked numbers — real, direction-consistent
+        overhead across reruns, not noise; attempted mid-session and
+        reverted, see below, not yet actually implemented):
+    - [ ] P0 `add.at` (~+54-170% overhead, worst in the table): loại bỏ
+          hẳn pass `ufunc_at()` thứ hai — fuse mask OR trực tiếp vào cùng
+          vòng lặp index đang có sẵn trong `ufunc_at__fast_iter`/
+          `ufunc_at__slow_iter`/`trivial_at_loop` thay vì gọi lại
+          `logical_or.at()` như 1 lệnh riêng. Rủi ro cao nhất trong nhóm
+          này — code này dùng chung cho *mọi* ufunc's `.at()`, đụng vào
+          `PyArrayMapIterObject`/overlap-copy/buffering, cần review kỹ
+          trước khi merge.
+    - [ ] P1 `add.accumulate` (~+53-71%): fuse running mask OR vào ngay
+          trong inner loop của `PyUFunc_Accumulate` (thêm 1 biến "running
+          OR" song song với "running sum" trong cùng vòng lặp) thay vì gọi
+          `logical_or.accumulate()` như 1 pass riêng. **Thử 1 lần**: fast
+          path cho mask 1-d contiguous (raw C loop OR thay vì gọi lại
+          `PyUFunc_Accumulate`) — đã build/test/leak-check sạch, giảm
+          overhead đo được từ ~53-71% xuống ~14-23%, nhưng **đã revert**
+          theo quyết định của user (muốn gộp lại xử lý 1 lần cùng P0/P3
+          thay vì làm rời rạc từng phase nhỏ) — code fast-path cụ thể
+          không còn trong repo, nhưng hướng đi này đã verify khả thi, có
+          thể làm lại nguyên xi khi quay lại phase này.
+    - [ ] P2 `.std()`/`.var()` (~+33-320%, biến động mạnh nhất): **thử 1
+          lần và sai chỗ** — tối ưu nhắm vào `PyArray_Std`/
+          `__New_PyArray_Std` (`multiarray/calculation.c`), nhưng
+          `ndarray.std()`/`.var()` từ Python thực ra forward sang
+          `numpy/_core/_methods.py::_std`/`_var` (`NPY_FORWARD_NDARRAY_METHOD`
+          trong `methods.c`), không hề gọi `PyArray_Std`. Code C đã sửa
+          build/test sạch nhưng không cải thiện benchmark thật (đã
+          revert). **Làm đúng lần sau phải sửa ở `_methods.py`**: tính
+          `logical_or.reduce(arr.mask, axis, where=where)` một lần đầu
+          hàm, chạy toàn bộ chain `umr_sum`/`subtract`/`square` trên 1
+          view đã tháo mask (`arr.view(); arr.mask = None`), gắn mask cuối
+          cùng vào `ret`. Cần cẩn thận với `where=`/`keepdims`/`mean=`
+          kwarg và nhánh phức số của hàm gốc.
+    - [ ] P3 elementwise `add`/`less` (~+13-65%): fuse mask propagation
+          vào chính SIMD/scalar inner loop (`umath/loops*.c.src`) thay vì
+          gọi `PyNumber_Or` như 1 pass riêng sau khi
+          `ufunc_generic_fastcall` đã chạy xong. Đây chính là việc
+          "AVX-512 masked loop" đã ghi trong "Settled design decisions" từ
+          đầu — phạm vi lớn nhất trong nhóm P0-P4 (đụng NEP 43
+          dtype/loop-resolution + mọi dtype loop của mọi ufunc), nên vẫn
+          để dành cho phase tối ưu riêng (12/13), không tranh thủ làm lẻ
+          tẻ ở đây.
+    - [ ] P4 `add.reduceat`/`add.outer` (~+7-103%): chưa quyết định hướng
+          — cần profile trước (xác định OR-mask pass hay phần dispatch
+          machinery chiếm phần lớn overhead) rồi mới chọn cách tối ưu,
+          không đoán mò như P2 đã vấp phải.
 - [ ] **6 — Indexing**
   - [ ] `multiarray/mapping.c` — basic indexing already covered in phase 2;
         advanced/fancy + boolean indexing (copy — build new mask

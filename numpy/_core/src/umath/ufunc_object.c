@@ -3871,6 +3871,94 @@ _parse_axis(PyObject *axes_obj, int ndim, int *axes)
 static PyArray_DTypeMeta * _get_dtype(PyObject *dtype_obj);
 
 /*
+ * Phase 4 (see TODO.md): mask propagation for `reduce`/`accumulate`/
+ * `reduceat`. Same black-box philosophy as phase 3 -- the real computation
+ * above is left completely untouched. The convention: run the *identical*
+ * reduce-like call again, with `logical_or` substituted for `ufunc` and the
+ * mask substituted for the data, reusing whatever shape/axis/identity/
+ * `where`-exclusion logic that call already implements correctly, rather
+ * than re-deriving it by hand for mask combination:
+ *   - `add.reduce(x)` -> `logical_or.reduce(x.mask)`: the result is masked
+ *     iff at least one contributing element was.
+ *   - `add.accumulate(x)` -> `logical_or.accumulate(x.mask)`: position i's
+ *     running total has incorporated everything up to i, so its mask is
+ *     the OR of everything up to i.
+ *   - `add.reduceat(x, ind)` -> `logical_or.reduceat(x.mask, ind)`: OR
+ *     within each segment `reduceat` itself defines.
+ * `initial=NULL` is passed deliberately (not the caller's own `initial`,
+ * which is a data identity, not a mask fact) so `logical_or`'s own
+ * built-in identity (`False`) applies -- an empty/identity-filled slot
+ * contributes no real data, so it must never read as masked.
+ * `where=` (only meaningful for `reduce`) is passed through unchanged:
+ * elements it excludes from the data combine are, by the same wheremask,
+ * excluded from the mask combine too -- unlike phase 3's `where=` gap,
+ * `reduce` always fully (re)writes every output position regardless of
+ * `where=` (it only decides which *inputs* feed in, not which *outputs*
+ * get written), so there is no "old mask to preserve" case to handle here.
+ */
+static int
+_propagate_reduce_mask(PyUFuncObject *ufunc, PyArrayObject *arr,
+        PyObject *result, int naxes, int *axes, int keepdims,
+        PyArrayObject *wheremask)
+{
+    PyObject *mask_in = PyArray_MASK(arr);
+    if (mask_in == NULL) {
+        return 0;
+    }
+    if (!PyArray_Check(result)) {
+        /* 0-d decayed to a scalar -- can't carry a mask, same documented
+         * gap as phase 3. */
+        return 0;
+    }
+    PyArrayObject *mask_out[1] = {NULL};
+    PyArray_DTypeMeta *mask_signature[3] = {NULL, NULL, NULL};
+    PyObject *mask_result = PyUFunc_Reduce(
+            (PyUFuncObject *)_npy_module_state->n_ops.logical_or,
+            (PyArrayObject *)mask_in, mask_out, naxes, axes,
+            mask_signature, keepdims, NULL, wheremask);
+    if (mask_result == NULL) {
+        return -1;
+    }
+    /* Steals mask_result's reference. */
+    return PyArray_SetMaskObject((PyArrayObject *)result, mask_result);
+}
+
+static int
+_propagate_accumulate_mask(PyArrayObject *arr, PyObject *result, int axis)
+{
+    PyObject *mask_in = PyArray_MASK(arr);
+    if (mask_in == NULL) {
+        return 0;
+    }
+    PyArray_DTypeMeta *mask_signature[3] = {NULL, NULL, NULL};
+    PyObject *mask_result = PyUFunc_Accumulate(
+            (PyUFuncObject *)_npy_module_state->n_ops.logical_or,
+            (PyArrayObject *)mask_in, NULL, axis, mask_signature);
+    if (mask_result == NULL) {
+        return -1;
+    }
+    return PyArray_SetMaskObject((PyArrayObject *)result, mask_result);
+}
+
+static int
+_propagate_reduceat_mask(PyArrayObject *arr, PyArrayObject *indices,
+        PyObject *result, int axis)
+{
+    PyObject *mask_in = PyArray_MASK(arr);
+    if (mask_in == NULL) {
+        return 0;
+    }
+    PyArray_DTypeMeta *mask_signature[3] = {NULL, NULL, NULL};
+    PyObject *mask_result = PyUFunc_Reduceat(
+            (PyUFuncObject *)_npy_module_state->n_ops.logical_or,
+            (PyArrayObject *)mask_in, indices, NULL, axis, mask_signature);
+    if (mask_result == NULL) {
+        return -1;
+    }
+    return PyArray_SetMaskObject((PyArrayObject *)result, mask_result);
+}
+
+/*
  * This code handles reduce, reduceat, and accumulate
  * (accumulate and reduce are special cases of the more general reduceat
  * but they are handled separately for speed)
@@ -4083,6 +4171,10 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
     case UFUNC_REDUCE:
         ret = PyUFunc_Reduce(ufunc,
                 mp, out, naxes, axes, signature, keepdims, initial, wheremask);
+        if (ret != NULL && _propagate_reduce_mask(
+                    ufunc, mp, ret, naxes, axes, keepdims, wheremask) < 0) {
+            Py_CLEAR(ret);
+        }
         Py_XSETREF(wheremask, NULL);
         break;
     case UFUNC_ACCUMULATE:
@@ -4097,6 +4189,9 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
         }
         ret = PyUFunc_Accumulate(ufunc,
                 mp, out[0], axes[0], signature);
+        if (ret != NULL && _propagate_accumulate_mask(mp, ret, axes[0]) < 0) {
+            Py_CLEAR(ret);
+        }
         break;
     case UFUNC_REDUCEAT:
         if (ndim == 0) {
@@ -4110,6 +4205,10 @@ PyUFunc_GenericReduction(PyUFuncObject *ufunc,
         }
         ret = PyUFunc_Reduceat(ufunc,
                 mp, indices, out[0], axes[0], signature);
+        if (ret != NULL && _propagate_reduceat_mask(
+                    mp, indices, ret, axes[0]) < 0) {
+            Py_CLEAR(ret);
+        }
         Py_SETREF(indices, NULL);
         break;
     }
@@ -5224,36 +5323,52 @@ fail:
  * ufunc machinery (which itself takes the fast mask==NULL path, since
  * mask arrays can never themselves carry a mask).
  *
+ * `where=` (partial writes) is treated as a *selective write*, for both
+ * data and mask: at positions `where` excludes, `out` keeps its old data
+ * (guaranteed by the wrapped `ufunc_generic_fastcall` itself) *and* its
+ * old mask (guaranteed here, by merging the newly propagated mask with
+ * `out`'s pre-call mask via `PyArray_Where` -- reusing `np.where`'s own
+ * broadcasting/selection instead of re-deriving the ufunc's iteration
+ * topology by hand). This only has a principled "old mask" to merge with
+ * when the caller passed a real `out=`; see the narrower gaps below.
+ *
  * Known, deliberate gaps (not a phase-3 blocker, just not yet handled):
- *   - `where=` (partial writes) is skipped entirely -- an output element
- *     `where` excludes keeps its old value *and* old mask, which this
- *     function does not attempt to reproduce correctly, so it leaves
- *     mask propagation off rather than risk getting it silently wrong.
+ *   - `where=` with `out=None` (the common case for a bare `a + b` isn't
+ *     affected -- this is specifically `where=` *without* an explicit
+ *     `out=`): the freshly allocated output leaves `where`-excluded
+ *     positions *uninitialized*, not "old, valid, differently-masked
+ *     data" -- there is no principled old mask to merge with, so mask
+ *     propagation is skipped entirely there, same as before.
+ *   - `where=` combined with a multi-output ufunc (`nout > 1`, e.g.
+ *     `divmod`) is skipped entirely too -- rare combination, not worth
+ *     the added complexity yet.
  *   - A 0-d result that decays to a plain Python/numpy scalar (not a
  *     PyArrayObject) can't carry a mask -- that piece of information is
  *     dropped for that call, since scalar types have no `mask` field.
  *   - gufuncs (`ufunc->core_enabled`, e.g. `matmul`) are excluded --
  *     that's phase 9.
  */
-static int
-_ufunc_call_has_where_kwarg(PyObject *kwnames)
+static PyObject *
+_ufunc_call_kwarg_value(PyObject *const *args, Py_ssize_t nargs,
+        PyObject *kwnames, const char *name)
 {
     if (kwnames == NULL) {
-        return 0;
+        return NULL;
     }
     Py_ssize_t n = PyTuple_GET_SIZE(kwnames);
     for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject *name = PyTuple_GET_ITEM(kwnames, i);
-        if (PyUnicode_CompareWithASCIIString(name, "where") == 0) {
-            return 1;
+        PyObject *kwname = PyTuple_GET_ITEM(kwnames, i);
+        if (PyUnicode_CompareWithASCIIString(kwname, name) == 0) {
+            return args[nargs + i];  /* borrowed */
         }
     }
-    return 0;
+    return NULL;
 }
 
 static int
 _propagate_ufunc_result_mask(PyUFuncObject *ufunc,
-        PyObject *const *args, Py_ssize_t nargs, PyObject *result)
+        PyObject *const *args, Py_ssize_t nargs, PyObject *result,
+        PyObject *where_obj, PyObject *out_obj)
 {
     int nin = ufunc->nin;
     int nout = ufunc->nout;
@@ -5305,6 +5420,15 @@ _propagate_ufunc_result_mask(PyUFuncObject *ufunc,
         n_outputs = nout;
     }
 
+    npy_bool has_where = (where_obj != NULL);
+    if (has_where && (n_outputs != 1 || out_obj == NULL
+                || !PyArray_Check(out_obj))) {
+        /* See the "known, deliberate gaps" note above the docstring: no
+         * principled old mask to merge with in these cases. */
+        Py_DECREF(combined_mask);
+        return 0;
+    }
+
     int ret = 0;
     for (int i = 0; i < n_outputs; i++) {
         if (!PyArray_Check(outputs[i])) {
@@ -5329,6 +5453,42 @@ _propagate_ufunc_result_mask(PyUFuncObject *ufunc,
             ret = -1;
             break;
         }
+
+        if (has_where) {
+            /* `out_arr` here is the exact object the caller passed as
+             * `out=` (n_outputs == 1 was enforced above), so its mask at
+             * this point is still whatever it was *before* this call --
+             * `ufunc_generic_fastcall` only ever touches `out`'s data
+             * buffer, never its `.mask` field -- no need to have
+             * snapshotted it earlier. */
+            PyObject *old_mask = PyArray_MASK(out_arr);
+            PyObject *old_mask_full;
+            if (old_mask == NULL) {
+                old_mask_full = PyArray_ZEROS(PyArray_NDIM(out_arr),
+                        PyArray_DIMS(out_arr), NPY_BOOL, 0);
+                if (old_mask_full == NULL) {
+                    Py_DECREF(full_mask);
+                    ret = -1;
+                    break;
+                }
+            }
+            else {
+                Py_INCREF(old_mask);
+                old_mask_full = old_mask;
+            }
+            /* new_data_mask where `where` is true, old mask otherwise --
+             * mirrors exactly how the wrapped call already treated the
+             * data itself. */
+            PyObject *merged = PyArray_Where(where_obj, full_mask, old_mask_full);
+            Py_DECREF(full_mask);
+            Py_DECREF(old_mask_full);
+            if (merged == NULL) {
+                ret = -1;
+                break;
+            }
+            full_mask = merged;
+        }
+
         /* Steals full_mask's reference. */
         if (PyArray_SetMaskObject(out_arr, full_mask) < 0) {
             ret = -1;
@@ -5358,9 +5518,25 @@ ufunc_generic_vectorcall(PyObject *ufunc,
             args, nargs, kwnames, NPY_FALSE);
 
     PyUFuncObject *uf = (PyUFuncObject *)ufunc;
-    if (result != NULL && !uf->core_enabled
-            && !_ufunc_call_has_where_kwarg(kwnames)) {
-        if (_propagate_ufunc_result_mask(uf, args, nargs, result) < 0) {
+    if (result != NULL && !uf->core_enabled) {
+        PyObject *where_obj = _ufunc_call_kwarg_value(
+                args, nargs, kwnames, "where");
+        PyObject *out_obj = _ufunc_call_kwarg_value(
+                args, nargs, kwnames, "out");
+        if (out_obj == NULL && uf->nout == 1 && nargs > uf->nin) {
+            /* `out` passed positionally rather than by keyword. */
+            out_obj = args[uf->nin];
+        }
+        if (out_obj != NULL && PyTuple_Check(out_obj)
+                && PyTuple_GET_SIZE(out_obj) == 1) {
+            /* Single-output ufuncs also accept `out=(arr,)`. */
+            out_obj = PyTuple_GET_ITEM(out_obj, 0);
+        }
+        if (out_obj == Py_None) {
+            out_obj = NULL;
+        }
+        if (_propagate_ufunc_result_mask(
+                    uf, args, nargs, result, where_obj, out_obj) < 0) {
             Py_DECREF(result);
             return NULL;
         }
@@ -6081,6 +6257,69 @@ ufunc_traverse(PyUFuncObject *self, visitproc visit, void *arg)
 
 
 /*
+ * Phase 4 (see TODO.md): mask propagation for `ufunc.outer(a, b)`. Unlike
+ * phase 3's elementwise OR-against-zeros broadcast (which aligns shapes
+ * from the trailing dimension, ordinary numpy-broadcasting style), outer's
+ * result shape is `a.shape + b.shape` -- concatenation, not broadcasting --
+ * so that trick would align the wrong axes. Instead this reuses the exact
+ * same mechanism outer() itself uses (`ufunc_generic_fastcall(..., outer=
+ * NPY_TRUE)`), called directly with `logical_or` on the masks: `a.mask`/
+ * `b.mask` (or an all-False stand-in of that operand's own shape, if
+ * unmasked) naturally combine into a result of shape `a.shape + b.shape`,
+ * matching the data result's shape exactly, with no shape math of our own.
+ */
+static int
+_propagate_outer_mask(PyArrayObject *a, PyArrayObject *b, PyObject *result)
+{
+    if (!PyArray_Check(result)) {
+        return 0;
+    }
+    PyObject *mask_a = PyArray_MASK(a);
+    PyObject *mask_b = PyArray_MASK(b);
+    if (mask_a == NULL && mask_b == NULL) {
+        return 0;
+    }
+
+    PyObject *mask_a_full;
+    if (mask_a != NULL) {
+        Py_INCREF(mask_a);
+        mask_a_full = mask_a;
+    }
+    else {
+        mask_a_full = PyArray_ZEROS(
+                PyArray_NDIM(a), PyArray_DIMS(a), NPY_BOOL, 0);
+        if (mask_a_full == NULL) {
+            return -1;
+        }
+    }
+    PyObject *mask_b_full;
+    if (mask_b != NULL) {
+        Py_INCREF(mask_b);
+        mask_b_full = mask_b;
+    }
+    else {
+        mask_b_full = PyArray_ZEROS(
+                PyArray_NDIM(b), PyArray_DIMS(b), NPY_BOOL, 0);
+        if (mask_b_full == NULL) {
+            Py_DECREF(mask_a_full);
+            return -1;
+        }
+    }
+
+    PyObject *outer_args[2] = {mask_a_full, mask_b_full};
+    PyObject *mask_result = ufunc_generic_fastcall(
+            (PyUFuncObject *)_npy_module_state->n_ops.logical_or,
+            outer_args, 2, NULL, NPY_TRUE);
+    Py_DECREF(mask_a_full);
+    Py_DECREF(mask_b_full);
+    if (mask_result == NULL) {
+        return -1;
+    }
+    /* Steals mask_result's reference. */
+    return PyArray_SetMaskObject((PyArrayObject *)result, mask_result);
+}
+
+/*
  * op.outer(a,b) is equivalent to op(a[:,NewAxis,NewAxis,etc.],b)
  * where a has b.ndim NewAxis terms appended.
  *
@@ -6109,7 +6348,15 @@ ufunc_outer(PyUFuncObject *ufunc,
         return NULL;
     }
 
-    return ufunc_generic_fastcall(ufunc, args, len_args, kwnames, NPY_TRUE);
+    PyObject *result = ufunc_generic_fastcall(ufunc, args, len_args, kwnames, NPY_TRUE);
+    if (result != NULL && PyArray_Check(args[0]) && PyArray_Check(args[1])) {
+        if (_propagate_outer_mask((PyArrayObject *)args[0],
+                    (PyArrayObject *)args[1], result) < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+    }
+    return result;
 }
 
 
@@ -6591,6 +6838,10 @@ ufunc_at__slow_iter(PyUFuncObject *ufunc, NPY_ARRAYMETHOD_FLAGS flags,
  * op2 - Second operand to ufunc (if needed). Must be able to broadcast
  *       over first operand.
  */
+/* forward declaration -- defined after ufunc_at, which it calls */
+static int _propagate_at_mask(
+        PyObject *op1, PyObject *idx, PyArrayObject *op2_array);
+
 static PyObject *
 ufunc_at(PyUFuncObject *ufunc, PyObject *args)
 {
@@ -6858,6 +7109,11 @@ ufunc_at(PyUFuncObject *ufunc, PyObject *args)
 fail:
     NPY_AUXDATA_FREE(auxdata);
 
+    if (res == 0 && !PyErr_Occurred() && ufunc->nin == 2
+            && _propagate_at_mask(op1, idx, op2_array) < 0) {
+        res = -1;
+    }
+
     Py_XDECREF(op2_array);
     Py_XDECREF(iter2);
     multi_XDECREF((PyObject *const *)operation_descrs, nop);
@@ -6881,6 +7137,83 @@ fail:
         Py_XDECREF(iter);
         Py_RETURN_NONE;
     }
+}
+
+/*
+ * Phase 4 (see TODO.md): mask propagation for `ufunc.at(op1, idx, op2)`.
+ * Same philosophy as the rest of phase 4 -- reuse the exact same `.at()`
+ * machinery (called directly here, not through the Python-visible method),
+ * with `logical_or` in place of `ufunc`, on the masks instead of the data:
+ * repeated indices in `idx` accumulate correctly for free, since OR is
+ * associative/commutative/idempotent regardless of application order --
+ * the same reason `add.at` already accumulates repeats correctly.
+ * Unary `.at()` (`ufunc->nin == 1`, no `op2`) needs no mask update at all:
+ * recomputing an element from itself introduces no new masked information,
+ * so the caller skips calling this entirely in that case.
+ */
+static int
+_propagate_at_mask(PyObject *op1, PyObject *idx, PyArrayObject *op2_array)
+{
+    if (!PyArray_Check(op1)) {
+        return 0;
+    }
+    PyArrayObject *op1_arr = (PyArrayObject *)op1;
+    PyObject *mask1 = PyArray_MASK(op1_arr);
+    PyObject *mask2 = (op2_array != NULL) ? PyArray_MASK(op2_array) : NULL;
+    if (mask1 == NULL && mask2 == NULL) {
+        return 0;
+    }
+
+    PyObject *mask1_full;
+    if (mask1 != NULL) {
+        Py_INCREF(mask1);
+        mask1_full = mask1;
+    }
+    else {
+        mask1_full = PyArray_ZEROS(
+                PyArray_NDIM(op1_arr), PyArray_DIMS(op1_arr), NPY_BOOL, 0);
+        if (mask1_full == NULL) {
+            return -1;
+        }
+    }
+    PyObject *mask2_full;
+    if (mask2 != NULL) {
+        Py_INCREF(mask2);
+        mask2_full = mask2;
+    }
+    else {
+        mask2_full = PyArray_ZEROS(
+                PyArray_NDIM(op2_array), PyArray_DIMS(op2_array), NPY_BOOL, 0);
+        if (mask2_full == NULL) {
+            Py_DECREF(mask1_full);
+            return -1;
+        }
+    }
+
+    PyObject *at_args = PyTuple_Pack(3, mask1_full, idx, mask2_full);
+    Py_DECREF(mask2_full);
+    if (at_args == NULL) {
+        Py_DECREF(mask1_full);
+        return -1;
+    }
+    PyObject *at_result = ufunc_at(
+            (PyUFuncObject *)_npy_module_state->n_ops.logical_or, at_args);
+    Py_DECREF(at_args);
+    if (at_result == NULL) {
+        Py_DECREF(mask1_full);
+        return -1;
+    }
+    Py_DECREF(at_result);  /* None */
+
+    if (mask1 == NULL) {
+        /* Newly materialized -- attach it (steals mask1_full's ref). */
+        return PyArray_SetMaskObject(op1_arr, mask1_full);
+    }
+    /* `mask1_full` *is* `op1`'s existing mask object; `.at()` already
+     * mutated its data buffer in place above, matching how the real call
+     * mutated `op1`'s own data in place -- nothing left to attach. */
+    Py_DECREF(mask1_full);
+    return 0;
 }
 
 

@@ -376,17 +376,60 @@ class TestMaskUfuncPropagation:
         c.mask[0] = False
         assert a.mask[0] == True
 
-    def test_where_kwarg_skips_mask_propagation(self):
-        # Documented gap: `where=` (partial writes) is not yet handled --
-        # mask propagation is skipped entirely rather than risk computing
-        # it wrong for the elements `where` excludes. Data is unaffected
-        # either way (mask never affects computation).
+    def test_where_kwarg_with_explicit_out_is_a_selective_write(self):
+        # `where=` + a real `out=` is treated as a masked write: at
+        # positions `where` excludes, `out` keeps both its old *data*
+        # (guaranteed by the wrapped call itself) and its old *mask*
+        # (merged here via `np.where(where, new_mask, old_mask)`).
         a = np.array([1, 2, 3])
         a.mask = np.array([True, False, False])
         b = np.array([4, 5, 6])
         out = np.zeros(3, dtype=int)
         r = np.add(a, b, out=out, where=np.array([True, True, False]))
+        assert r is out
+        assert np.array_equal(r, [5, 7, 0])
+        # position 0: where=True -> new mask (True, from a)
+        # position 1: where=True -> new mask (False)
+        # position 2: where=False -> old mask (out had none -> False)
+        assert np.array_equal(r.mask, [True, False, False])
+
+    def test_where_kwarg_preserves_old_mask_at_excluded_positions(self):
+        # Same as above, but `out` already had its own mask before the
+        # call -- the excluded position must keep exactly that, not just
+        # "unmasked".
+        a = np.array([1, 2, 3])
+        a.mask = np.array([True, False, False])
+        b = np.array([4, 5, 6])
+        out = np.array([10, 20, 30])
+        out.mask = np.array([False, False, True])
+        r = np.add(a, b, out=out, where=np.array([True, True, False]))
+        assert np.array_equal(r, [5, 7, 30])
+        # position 2 (where=False) must keep out's own old mask (True),
+        # not the propagated-but-unused new_mask (False from a/b).
+        assert np.array_equal(r.mask, [True, False, True])
+
+    def test_where_kwarg_without_explicit_out_still_skips_propagation(self):
+        # Documented, narrower gap: `where=` with a freshly allocated
+        # `out=None` leaves excluded positions *uninitialized*, not "old,
+        # valid, differently-masked data" -- there is no principled old
+        # mask to merge with, so mask propagation is skipped entirely,
+        # same as phase 3's original (broader) gap.
+        a = np.array([1, 2, 3])
+        a.mask = np.array([True, False, False])
+        b = np.array([4, 5, 6])
+        r = np.add(a, b, out=None, where=np.array([True, True, False]))
         assert np.array_equal(r[:2], [5, 7])
+        assert r.mask is None
+
+    def test_where_kwarg_with_multi_output_ufunc_skips_propagation(self):
+        # Documented, narrower gap: `where=` combined with a multi-output
+        # ufunc (e.g. `divmod`) is not handled -- rare combination.
+        x = np.array([7, 8, 9])
+        x.mask = np.array([True, False, False])
+        y = np.array([2, 2, 2])
+        with pytest.warns(UserWarning, match="uninitialized memory"):
+            q, r = np.divmod(x, y, where=np.array([True, True, False]))
+        assert q.mask is None
         assert r.mask is None
 
     def test_multi_output_ufunc_propagates_mask_to_each_output(self):
@@ -399,3 +442,214 @@ class TestMaskUfuncPropagation:
         assert np.array_equal(r, [1, 0, 1])
         assert np.array_equal(q.mask, [True, False, False])
         assert np.array_equal(r.mask, [True, False, False])
+
+
+class TestMaskReduceLike:
+    """Phase 4 (see TODO.md): `reduce`/`accumulate`/`reduceat`/`outer`/
+    `at` -- the ufunc methods, which don't go through
+    `ufunc_generic_vectorcall` and so need their own mask handling.
+    Convention: run the identical method again with `logical_or` on the
+    mask(s) instead of `ufunc` on the data.
+    """
+
+    def test_reduce_mask_is_or_of_contributing_elements(self):
+        # keepdims=True keeps the result a 0-d-avoiding real array; a full
+        # reduction without it decays to a scalar, see the dedicated gap
+        # test below (same root cause as phase 3's scalar-decay gap).
+        x = np.array([1, 2, 3, 4])
+        x.mask = np.array([False, True, False, False])
+        r = np.add.reduce(x, keepdims=True)
+        assert r[0] == 10
+        assert bool(r.mask[0]) is True
+
+    def test_reduce_no_mask_stays_unmasked(self):
+        x = np.array([1, 2, 3, 4])
+        r = np.add.reduce(x, keepdims=True)
+        assert r.mask is None
+
+    def test_full_reduce_decays_to_scalar_drops_mask(self):
+        # Known, documented gap (same root cause as phase 3's ufunc
+        # scalar-decay gap): a full reduction (no axis, keepdims=False)
+        # returns a plain numpy scalar, which has no `mask` field.
+        x = np.array([1, 2, 3, 4])
+        x.mask = np.array([False, True, False, False])
+        r = np.add.reduce(x)
+        assert r == 10
+        assert not hasattr(r, "mask")
+
+    def test_reduce_with_axis_masks_only_affected_rows(self):
+        x = np.array([[1, 2], [3, 4], [5, 6]])
+        x.mask = np.array([[False, False], [True, False], [False, False]])
+        r = np.add.reduce(x, axis=1)
+        assert np.array_equal(r, [3, 7, 11])
+        assert np.array_equal(r.mask, [False, True, False])
+
+    def test_reduce_where_excludes_masked_element_from_result_mask(self):
+        # `where=` for reduce excludes *inputs* from the combine (every
+        # output position is still fully (re)written), so applying the
+        # same `where` to the mask combine correctly drops an excluded
+        # masked element's contribution too.
+        x = np.array([1, 2, 3])
+        x.mask = np.array([False, True, False])
+        r = np.add.reduce(
+                x, where=np.array([True, False, True]), initial=0,
+                keepdims=True)
+        assert r[0] == 4  # 1 + 3, element 2 (value, masked) excluded
+        # Excluding the only masked element leaves an all-False mask,
+        # which canonicalizes back to NULL (see "Unmasked representation").
+        assert r.mask is None
+
+    def test_reduce_empty_slice_identity_is_not_masked(self):
+        # An identity-filled slot (from `initial=`) contributes no real
+        # data, so it must never read as masked, even though the *only*
+        # element of the array is masked but excluded by `where=`.
+        x = np.array([5])
+        x.mask = np.array([True])
+        r = np.add.reduce(x, where=np.array([False]), initial=0, keepdims=True)
+        assert r[0] == 0
+        assert r.mask is None
+
+    def test_sum_mean_max_min_any_all_inherit_mask_from_reduce(self):
+        # calculation.c's .sum()/.mean()/.max()/.min()/.any()/.all() all
+        # route through PyArray_GenericReduceFunction -> PyUFunc_Reduce,
+        # so they need no code of their own -- confirm that's really so.
+        # axis= keeps the result a real array rather than decaying to a
+        # scalar (see the dedicated scalar-decay gap test above).
+        x = np.array([[1.0, 2.0, 3.0, 4.0]])
+        x.mask = np.array([[False, True, False, False]])
+        assert bool(x.sum(axis=1).mask[0]) is True
+        assert bool(x.mean(axis=1).mask[0]) is True
+        assert bool(x.max(axis=1).mask[0]) is True
+        assert bool(x.min(axis=1).mask[0]) is True
+        assert bool(np.any(x > 10, axis=1).mask[0]) is True
+        assert bool(np.all(x > 0, axis=1).mask[0]) is True
+
+    def test_std_var_mask_spreads_across_whole_axis(self):
+        # Deliberate, documented consequence of composition (not a
+        # separate code path): `x - mean(x)` OR's every element's mask
+        # with the (already axis-wide) mean's mask, so if *any* element
+        # in an axis is masked, std/var for that whole axis reads masked.
+        x = np.array([[1.0, 2.0], [3.0, 4.0]])
+        x.mask = np.array([[False, False], [True, False]])
+        std = x.std(axis=1)
+        var = x.var(axis=1)
+        assert np.array_equal(std.mask, [False, True])
+        assert np.array_equal(var.mask, [False, True])
+
+    def test_argmax_argmin_ignore_mask_when_selecting(self):
+        # argmax/argmin return an index, not data -- like argsort (phase
+        # 2), the result carries no mask -- and the masked element must
+        # still fully participate in the comparison (mask never affects
+        # computation).
+        x = np.array([1.0, 9.0, 3.0])
+        x.mask = np.array([False, True, False])
+        assert x.argmax() == 1  # still picks the masked, larger element
+        assert not hasattr(x.argmax(), "mask")
+
+    def test_accumulate_mask_is_cumulative_or(self):
+        x = np.array([1, 2, 3, 4])
+        x.mask = np.array([False, True, False, False])
+        r = np.add.accumulate(x)
+        assert np.array_equal(r, [1, 3, 6, 10])
+        assert np.array_equal(r.mask, [False, True, True, True])
+
+    def test_accumulate_no_mask_stays_unmasked(self):
+        x = np.array([1, 2, 3, 4])
+        r = np.add.accumulate(x)
+        assert r.mask is None
+
+    def test_accumulate_non_contiguous_mask_matches_contiguous(self):
+        # Perf fast path (see BENCHMARKS.md P1) only applies to a 1-d,
+        # C-contiguous mask; anything else falls back to the general
+        # PyUFunc_Accumulate(logical_or, ...) path. Cross-check the
+        # fallback against a manual `logical_or.accumulate` to confirm
+        # both paths agree.
+        y = np.arange(10)
+        y.mask = (np.arange(10) % 3 == 0)
+        yv = y[::2]  # non-unit stride -> non-contiguous mask view
+        assert not yv.mask.flags["C_CONTIGUOUS"]
+        r = np.add.accumulate(yv)
+        assert np.array_equal(r.mask, np.logical_or.accumulate(yv.mask))
+
+    def test_std_var_full_reduction_scalar_decay_does_not_crash(self):
+        # Same documented scalar-decay gap as phases 3/4's reduce path:
+        # a full (single-axis, 1-d input) reduction decays to a plain
+        # scalar with no `mask` field -- must not crash attaching a mask.
+        a = np.array([1.0, 2.0, 3.0])
+        a.mask = np.array([True, False, False])
+        s = a.std(axis=0)
+        v = a.var(axis=0)
+        assert not hasattr(s, "mask")
+        assert not hasattr(v, "mask")
+
+    def test_reduceat_mask_is_or_within_each_segment(self):
+        x = np.array([1, 2, 3, 4, 5])
+        x.mask = np.array([False, True, False, False, False])
+        # segments: [0:2), [2:4), [4:5) -> sums [3, 7, 5]
+        r = np.add.reduceat(x, [0, 2, 4])
+        assert np.array_equal(r, [3, 7, 5])
+        assert np.array_equal(r.mask, [True, False, False])
+
+    def test_outer_mask_shape_matches_concatenated_shapes(self):
+        a = np.array([1, 2])
+        a.mask = np.array([False, True])
+        b = np.array([10, 20, 30])
+        r = np.add.outer(a, b)
+        assert r.shape == (2, 3)
+        assert np.array_equal(
+                r.mask, [[False, False, False], [True, True, True]])
+
+    def test_outer_one_sided_mask_broadcasts_correctly(self):
+        a = np.array([1, 2])
+        b = np.array([10, 20, 30])
+        b.mask = np.array([False, True, False])
+        r = np.add.outer(a, b)
+        assert np.array_equal(
+                r.mask, [[False, True, False], [False, True, False]])
+
+    def test_outer_no_mask_stays_unmasked(self):
+        a = np.array([1, 2])
+        b = np.array([10, 20, 30])
+        r = np.add.outer(a, b)
+        assert r.mask is None
+
+    def test_at_binary_ors_mask_at_touched_positions_only(self):
+        a = np.array([1, 2, 3])
+        a.mask = np.array([True, False, False])
+        b = np.array([10, 20])
+        np.add.at(a, [1, 2], b)
+        assert np.array_equal(a, [1, 12, 23])
+        # position 0 untouched -> keeps its own old mask.
+        assert np.array_equal(a.mask, [True, False, False])
+
+    def test_at_binary_propagates_mask_from_second_operand(self):
+        a = np.array([1, 2, 3])
+        b = np.array([10, 20])
+        b.mask = np.array([True, False])
+        np.add.at(a, [0, 1], b)
+        assert np.array_equal(a, [11, 22, 3])
+        assert np.array_equal(a.mask, [True, False, False])
+
+    def test_at_binary_repeated_indices_accumulate_mask_correctly(self):
+        a = np.array([0])
+        a.mask = np.array([False])
+        b = np.array([1, 2, 3])
+        b.mask = np.array([False, True, False])
+        np.add.at(a, [0, 0, 0], b)
+        assert a[0] == 6
+        # OR is associative/commutative/idempotent -- any masked
+        # contribution anywhere in the run of repeats marks the result.
+        assert bool(a.mask[0]) is True
+
+    def test_at_unary_does_not_touch_mask(self):
+        a = np.array([1, 2, 3])
+        a.mask = np.array([False, True, False])
+        np.negative.at(a, [0, 1])
+        assert np.array_equal(a, [-1, -2, 3])
+        assert np.array_equal(a.mask, [False, True, False])
+
+    def test_at_no_mask_stays_unmasked(self):
+        a = np.array([1, 2, 3])
+        b = np.array([10, 20])
+        np.add.at(a, [0, 1], b)
+        assert a.mask is None
