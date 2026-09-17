@@ -483,6 +483,31 @@ array_base_get(PyArrayObject *self, void *NPY_UNUSED(ignored))
 }
 
 
+static PyObject *
+array_mask_get(PyArrayObject *self, void *NPY_UNUSED(ignored))
+{
+    if (PyArray_MASK(self) == NULL) {
+        Py_RETURN_NONE;
+    }
+    else {
+        Py_INCREF(PyArray_MASK(self));
+        return PyArray_MASK(self);
+    }
+}
+
+
+static int
+array_mask_set(PyArrayObject *self, PyObject *arg)
+{
+    if (arg == NULL || arg == Py_None) {
+        /* `del arr.mask` and `arr.mask = None` both clear it. */
+        return PyArray_SetMaskObject(self, NULL);
+    }
+    Py_INCREF(arg);
+    return PyArray_SetMaskObject(self, arg);
+}
+
+
 /*
  * Fetches the real or imaginary part of an array. If `need_view` is set the return
  * cannot be a copy (must be a view).
@@ -782,6 +807,10 @@ NPY_NO_EXPORT PyGetSetDef array_getsetlist[] = {
     {"base",
         (getter)array_base_get,
         NULL,
+        NULL, NULL},
+    {"mask",
+        (getter)array_mask_get,
+        (setter)array_mask_set,
         NULL, NULL},
     {"dtype",
         (getter)array_descr_get,

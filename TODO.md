@@ -177,6 +177,20 @@ tests from scratch.
         external callers.
   - [x] Verified: `spin build` clean, zero regression — see the "Regression
         baseline" table near the top of this file.
+  - [x] Expose `mask` as a Python-level property (`arr.mask`), since phase 2+
+        needs a way to attach masks from Python to test against. Added
+        `array_mask_get`/`array_mask_set` in `getset.c` next to `base`'s
+        getter (settable, unlike `base`, mirroring `dtype`'s
+        getter+setter shape): getter returns `None` when unset;
+        setter/`del arr.mask` both route through `PyArray_SetMaskObject`,
+        so the invariant/dtype/shape checks apply from Python too, not
+        just from C callers.
+  - [x] Leak-checked (refcount + RSS, not just correctness): balanced
+        `sys.getrefcount` across 1000x per error path (invariant/dtype/shape
+        rejection), 100000x attach+explicit-clear, 100000x
+        attach-then-dealloc-without-clearing, and mask replacement dropping
+        the old mask's reference. RSS flat (0.0 MB delta) over 500000
+        alternating attach/clear/dealloc iterations.
 - [ ] **2 — Ufunc dispatch (arithmetic, trig, comparisons)**
   - [ ] `umath/ufunc_object.c` — central `if (has_mask)` branch point
   - [ ] `umath/dispatching.c` — masked loop variant selection (NEP 43)
