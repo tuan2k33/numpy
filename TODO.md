@@ -7,8 +7,34 @@ branches. Track upstream and rebase periodically rather than diverging long-term
 
 ## Housekeeping
 
-- [ ] Pull from `origin/main` every day — this is a long-running fork of a
-      fast-moving codebase, drift compounds fast if skipped.
+- [ ] Pull from `origin/main` every day and before every push — this is a long-running fork of a fast-moving codebase, drift compounds fast if skipped.
+
+## Scope: which problem this solves
+
+Two different usecases get called "masked array" and demand different designs:
+
+1. **Genuinely missing data** — the value never existed / is unknown. MISSING
+   semantics (R/SQL `NULL`). This is what the `nulldtype` bitpattern project
+   (sibling, separate repo) solves — there, "hiding" a value **destroys** the
+   old one (not observable afterwards), which is correct for this case: the
+   whole point is nobody should be able to recover a value nobody ever knew.
+2. **Complete data, selectively hidden** — the value is real and known, just
+   excluded from a given view/computation for some reason: license/access
+   control (redact a column for one audience, not another), an algorithm that
+   needs to vary which elements are visible (dropout, k-fold
+   cross-validation, random subsampling), etc.
+
+**This fork targets case 2.** Case 1 is deliberately out of scope for now —
+revisit later if it turns out to matter here too. This is exactly why
+flag-layout (not bitpattern) is the right shape for this work: nothing about
+`T`'s value range is sacrificed, hiding is non-destructive/reversible, and
+because `mask` lives on the array *object* (not the data buffer), several
+views can share one data buffer under *different* masks at once — e.g. two
+users seeing different redactions of the same underlying array, or two CV
+folds masking the same dataset differently — with no data copy. Worth
+testing explicitly once views are implemented (phase 4): construct two views
+over the same `base` data with different masks and confirm they don't
+interfere with each other.
 
 ## Settled design decisions
 
@@ -42,6 +68,45 @@ branches. Track upstream and rebase periodically rather than diverging long-term
   (`numpy/_core/src/common/simd/`) to add the AVX-512 masked variant per loop
   rather than building runtime CPU dispatch from scratch.
 
+## Goal: no rebuild required for plain-array users
+
+Anyone *not* touching masked arrays should be unaffected without rebuilding
+anything of theirs:
+
+- **Packages precompiled against stock numpy** (pandas, scipy, any wheel
+  using `PyArray_DATA`/accessor macros) must keep working unmodified against
+  this fork's numpy. This falls out of the existing version-negotiation in
+  `import_array()`: an extension declares "I need API version ≤ X", the
+  runtime declares "I provide version ≥ X" — compatible, no rebuild. Must
+  hold as an invariant through every phase: `mask` is purely additive, gated
+  behind a version strictly newer than anything existing code could request
+  (phase 1), and `mask == NULL` behavior is byte-identical to upstream.
+- **Someone who wants masked arrays from Python**: no rebuild at all — just
+  run on this fork's already-built numpy and call the new Python-level API.
+  Same as adopting any new feature in a new numpy release.
+- **Someone who wants to touch `mask` from their own C extension**: *they*
+  rebuild *their* extension against this fork's headers — not numpy itself
+  (already built). Never the other direction.
+
+## Backward compatibility of adding a struct field
+
+Checked against the actual header (`ndarraytypes.h:787-857`): this is safer
+than a naive "patching a public C struct always breaks ABI" take suggests.
+`PyArrayObject_fields` (the real struct) is already hidden behind an opaque
+`PyArrayObject` typedef for any external code that sets
+`NPY_NO_DEPRECATED_API` (recommended since NumPy 1.7, 2013) — such code only
+touches the array via `PyArray_DATA`/`PyArray_NDIM`/etc., which resolve
+through the `PyArray_API` function-pointer table at runtime, not hardcoded
+offsets. There's direct precedent: `_buffer_info` was added at
+`NPY_1_20_API_VERSION` and `mem_handler` at `NPY_1_22_API_VERSION`, both
+gated the same way `mask` will be (see phase 1).
+
+Net effect: source code using the accessor API is unaffected. Old
+*precompiled* wheels that read fields directly (`arr->data` without the
+deprecated-API guard) would break at runtime against a numpy built with the
+new field — same risk numpy itself already accepted twice for `_buffer_info`
+and `mem_handler`, not a new category of risk this project introduces.
+
 ## Existing test suites to reuse as templates / regression baseline
 
 No dedicated test suite exists yet (feature isn't written). These existing
@@ -71,10 +136,32 @@ tests from scratch.
   - [ ] New branch off `main` dedicated to this (don't reuse
         `enh/mean-var-non-legacy-dtype`)
   - [ ] Confirm build config / CI baseline against numpy `main`
-- [ ] **1 — Struct & invariants**
-  - [ ] Add `mask` field to `PyArrayObject`
-  - [ ] Refcount handling (mirror `base`)
-  - [ ] Enforce `mask->mask == NULL` invariant
+- [x] **1 — Struct & invariants** (done on `refactor/ndarray-mask`)
+  - [x] Added `NPY_2_7_API_VERSION 0x00000017` (`numpyconfig.h`), bumped
+        `C_API_VERSION` in `numpy/_core/meson.build` (header-only change,
+        same md5 in `cversions.txt` reused — no C-API function table
+        change, matching the "Version 19: only header additions" precedent).
+  - [x] Added `mask` field to `PyArrayObject_fields` in `ndarraytypes.h`,
+        gated `#if NPY_FEATURE_VERSION >= NPY_2_7_API_VERSION`, appended
+        after `mem_handler` (append-only keeps existing field offsets
+        stable — see backward-compat note below). Added `PyArray_MASK()`
+        accessor next to `PyArray_BASE()`.
+  - [x] Init `fa->mask = NULL` in `ctors.c` (`PyArray_NewFromDescr` path),
+        unguarded like sibling fields (internal build always has the
+        current feature version).
+  - [x] Refcount handling: `Py_CLEAR(fa->mask)` added to
+        `_clear_array_attributes` in `arrayobject.c` (same function `base`
+        is cleared in, used by both dealloc and pickle `__setstate__`).
+  - [x] Enforce `mask->mask == NULL` invariant: added internal (not yet
+        public-C-API) `PyArray_SetMaskObject(arr, obj)` in `arrayobject.c`
+        (declared in `arrayobject.h`), mirroring `PyArray_SetBaseObject`'s
+        shape. Refuses: non-ndarray, non-bool dtype, `PyArray_MASK(obj) !=
+        NULL` (the invariant), and shape mismatch. Not registered in
+        `numpy_api.py` yet — internal-only until a later phase needs
+        external callers.
+  - [x] Verified: `spin build` clean, then `spin test -- test_multiarray.py
+        test_indexing.py` → 14916 passed (== the Phase 0 baseline
+        14810 + 106), same skips — zero regression with `mask == NULL`.
 - [ ] **2 — Ufunc dispatch (arithmetic, trig, comparisons)**
   - [ ] `umath/ufunc_object.c` — central `if (has_mask)` branch point
   - [ ] `umath/dispatching.c` — masked loop variant selection (NEP 43)
@@ -112,6 +199,19 @@ tests from scratch.
   - [ ] `multiarray/buffer.c` (buffer protocol — decide: expose data only,
         or refuse when masked)
 - [ ] **11 — Benchmarking**
+  - Relevant `asv` files: `benchmarks/benchmarks/bench_core.py`,
+    `bench_indexing.py`, `bench_ufunc.py`, `bench_ufunc_strides.py`
+    (contiguous vs. strided — the one closest to the fast/fallback path
+    split), `bench_array_coercion.py`.
+  - `spin bench -t <name>` is slow by design (asv calibrates + repeats each
+    benchmark in its own subprocess; `bench_ufunc_strides` alone is a
+    dtype × stride × op matrix, hundreds of parameter combos).
+    **Phase 0 baseline: run full (no `-q`)** — done below, this is the
+    number everything else compares against. **Phase 1 onward, during
+    day-to-day development: `spin bench -q -t <name>`** (quick, one run, no
+    calibration) for "did I break something" checks. Only drop back to a
+    full (no `-q`) run for the real before/after comparison once a phase's
+    masked path is actually implemented and ready to judge.
   - [ ] No-mask path: confirm zero measurable regression vs. upstream `main`
   - [ ] Contiguous masked path: confirm near-native speed vs. plain op
         (AVX-512 available)

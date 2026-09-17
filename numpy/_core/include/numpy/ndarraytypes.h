@@ -833,6 +833,18 @@ typedef struct tagPyArrayObject_fields {
 #if NPY_FEATURE_VERSION >= NPY_1_22_API_VERSION
     PyObject *mem_handler;
 #endif
+    /*
+     * Optional boolean ndarray, same shape as this array, marking which
+     * elements are hidden from a given view/computation. NULL means no
+     * mask (the common case; every existing code path is unaffected).
+     * This is a *view/redaction* mechanism (elements are real and known,
+     * just excluded), not a MISSING-value representation -- see
+     * TODO.md's "Scope" section. Invariant: a mask array's own `mask`
+     * field must always be NULL (no masked masks).
+     */
+#if NPY_FEATURE_VERSION >= NPY_2_7_API_VERSION
+    PyObject *mask;
+#endif
 } PyArrayObject_fields;
 
 /*
@@ -1648,6 +1660,14 @@ PyArray_BASE(const PyArrayObject *arr)
 {
     return _PyArray_GET_ITEM_DATA(arr)->base;
 }
+
+#if NPY_FEATURE_VERSION >= NPY_2_7_API_VERSION
+static inline NPY_RETURNS_BORROWED_REF PyObject *
+PyArray_MASK(const PyArrayObject *arr)
+{
+    return _PyArray_GET_ITEM_DATA(arr)->mask;
+}
+#endif
 
 static inline NPY_RETURNS_BORROWED_REF PyArray_Descr *
 PyArray_DESCR(const PyArrayObject *arr)

@@ -225,6 +225,77 @@ PyArray_SetBaseObject(PyArrayObject *arr, PyObject *obj)
 }
 
 
+/*
+ * Sets the 'mask' attribute of the array: a boolean ndarray of the same
+ * shape marking which elements are hidden from this view/computation
+ * (case 2 in TODO.md's "Scope" section -- the data is real and known,
+ * just selectively excluded; this is not a MISSING-value representation).
+ *
+ * Pass NULL or Py_None to clear an existing mask. Otherwise steals a
+ * reference to 'obj'.
+ *
+ * Enforces the invariant that a mask's own mask must always be NULL:
+ * masking a mask has no defined meaning (see TODO.md) and would make
+ * "is this element hidden" an unanswerable, infinitely-recursive
+ * question, so it's refused outright rather than given ad hoc semantics.
+ *
+ * Not yet part of the public C-API table (no numpy_api.py entry) --
+ * internal only for phase 1. Exposing it publicly is deferred to
+ * whichever later phase actually needs external callers to attach masks.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+NPY_NO_EXPORT int
+PyArray_SetMaskObject(PyArrayObject *arr, PyObject *obj)
+{
+    PyArrayObject_fields *fa = (PyArrayObject_fields *)arr;
+
+    if (obj == NULL || obj == Py_None) {
+        Py_CLEAR(fa->mask);
+        Py_XDECREF(obj);
+        return 0;
+    }
+
+    if (!PyArray_Check(obj)) {
+        PyErr_SetString(PyExc_TypeError,
+                "mask must be an ndarray of dtype bool");
+        Py_DECREF(obj);
+        return -1;
+    }
+
+    PyArrayObject *mask_arr = (PyArrayObject *)obj;
+
+    if (PyArray_TYPE(mask_arr) != NPY_BOOL) {
+        PyErr_SetString(PyExc_TypeError,
+                "mask must be an ndarray of dtype bool");
+        Py_DECREF(obj);
+        return -1;
+    }
+
+    if (PyArray_MASK(mask_arr) != NULL) {
+        PyErr_SetString(PyExc_ValueError,
+                "a mask array cannot itself have a mask "
+                "(mask->mask must be NULL)");
+        Py_DECREF(obj);
+        return -1;
+    }
+
+    if (PyArray_NDIM(mask_arr) != PyArray_NDIM(arr) ||
+            !PyArray_CompareLists(PyArray_DIMS(mask_arr), PyArray_DIMS(arr),
+                                   PyArray_NDIM(arr))) {
+        PyErr_SetString(PyExc_ValueError,
+                "mask must have the same shape as the array it masks");
+        Py_DECREF(obj);
+        return -1;
+    }
+
+    Py_CLEAR(fa->mask);
+    fa->mask = obj;
+
+    return 0;
+}
+
+
 /**
  * Assign an arbitrary object a NumPy array. This is largely basically
  * identical to PyArray_FromAny, but assigns directly to the output array.
@@ -420,6 +491,10 @@ _clear_array_attributes(PyArrayObject *self, npy_bool unraisable)
          */
         Py_CLEAR(fa->base);
     }
+
+    /* mask (if any) is an owned reference to a bool ndarray; see
+     * PyArray_SetMaskObject for the invariant it must satisfy. */
+    Py_CLEAR(fa->mask);
 
     if ((fa->flags & NPY_ARRAY_OWNDATA) && fa->data) {
         /* Free any internal references */

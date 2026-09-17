@@ -27,6 +27,14 @@ NPY_NO_EXPORT int
 clear_array_attributes(PyArrayObject *self);
 
 /*
+ * Sets (or, with NULL/Py_None, clears) `arr`'s mask -- see the definition
+ * in arrayobject.c for the full contract and the mask->mask invariant it
+ * enforces. Not yet part of the public C-API (see TODO.md phase 1/2).
+ */
+NPY_NO_EXPORT int
+PyArray_SetMaskObject(PyArrayObject *arr, PyObject *obj);
+
+/*
  * This flag is used to mark arrays which we would like to, in the future,
  * turn into views. It causes a warning to be issued on the first attempt to
  * write to the array (but the write is allowed to succeed).

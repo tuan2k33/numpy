@@ -707,6 +707,7 @@ PyArray_NewFromDescr_int(
     fa->descr = descr;
     fa->base = (PyObject *)NULL;
     fa->weakreflist = (PyObject *)NULL;
+    fa->mask = (PyObject *)NULL;
 
     /* needed for zero-filling logic below, defined and initialized up here
        so cleanup logic can go in the fail block */
