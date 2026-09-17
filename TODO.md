@@ -47,7 +47,7 @@ because `mask` lives on the array *object* (not the data buffer), several
 views can share one data buffer under *different* masks at once — e.g. two
 users seeing different redactions of the same underlying array, or two CV
 folds masking the same dataset differently — with no data copy. Worth
-testing explicitly once views are implemented (phase 4): construct two views
+testing explicitly once views are implemented (phase 2): construct two views
 over the same `base` data with different masks and confirm they don't
 interfere with each other.
 
@@ -191,43 +191,73 @@ tests from scratch.
         attach-then-dealloc-without-clearing, and mask replacement dropping
         the old mask's reference. RSS flat (0.0 MB delta) over 500000
         alternating attach/clear/dealloc iterations.
-- [ ] **2 — Ufunc dispatch (arithmetic, trig, comparisons)**
+- [ ] **2 — Basic ops: mask propagation + reorder correctness (promoted
+        ahead of dispatch — found by manually probing `copy`/`view`/
+        `reshape`/`sort`/`partition` right after phase 1 landed)**
+  - Current (untouched since phase 1) behavior, verified empirically:
+    `copy()`/`view()`/`a[:]`/`reshape()` all **silently drop** the mask
+    (new array's `mask` is `NULL`) — safe but wrong, and defeats the
+    case-2 goal (redaction should survive a plain `.view()` unless the
+    caller explicitly asks for a different mask). `sort()`/`partition()`
+    are worse: they reorder **data** in place but leave **mask** exactly
+    where it was — the mask now marks the wrong elements, silently
+    (verified: `[3,1,4,1,5]` masked at indices `[1,4]`, after `.sort()` the
+    same indices `[1,4]` are still marked even though the values that were
+    there moved to indices `[0,1]`). This is a correctness bug once masks
+    exist for real use, not just a missing-feature gap — hence jumping the
+    queue ahead of ufunc dispatch.
+  - [ ] `copy()`/`view()`/`a[:]` (`multiarray/ctors.c`, `mapping.c` basic
+        indexing path): propagate the parent's mask to the new array by
+        default (deep-copy the mask array for `copy()`; for a view, decide
+        share-vs-copy against the phase-4 "two views, different masks over
+        one buffer" test from the Scope section — a plain `.view()` with no
+        new mask argument should probably still see the parent's
+        redaction, not lose it)
+  - [ ] `reshape()`/`ravel()`/`squeeze()` (`multiarray/shape.c`): reshape
+        the mask identically alongside data, same shape transform applied
+        to both
+  - [ ] `sort()`/`argsort()`/`partition()`/`argpartition()`
+        (`npysort/*.c.src`, `multiarray/item_selection.c`): must permute
+        `mask` by the exact same permutation applied to `data` — not leave
+        it stationary. Add a regression test asserting mask tracks value
+        identity through a sort, mirroring the `[3,1,4,1,5]` case above.
+- [ ] **3 — Ufunc dispatch (arithmetic, trig, comparisons)**
   - [ ] `umath/ufunc_object.c` — central `if (has_mask)` branch point
   - [ ] `umath/dispatching.c` — masked loop variant selection (NEP 43)
   - [ ] `umath/loops*.c.src` — masked-AVX512 loop + strided fallback loop,
         starting with binary arithmetic on `float64`/`int64` as proof of
         concept before generalizing
-- [ ] **3 — Reductions / accumulate**
+- [ ] **4 — Reductions / accumulate**
   - [ ] `umath/reduction.c`, `umath/ufunc_object.c`
         (`reduce`/`accumulate`/`reduceat`/`outer`/`at`)
   - [ ] `multiarray/calculation.c` (`.sum()`, `.mean()`, `.argmax()`...)
-- [ ] **4 — View propagation**
-  - [ ] `multiarray/shape.c` (reshape/ravel/squeeze/transpose)
+- [ ] **5 — Further view propagation** (basic reshape/view covered in
+        phase 2 already; this is the rest)
   - [ ] `multiarray/getset.c` (`.T` and friends)
   - [ ] `multiarray/ctors.c` (`broadcast_to`)
-- [ ] **5 — Indexing**
-  - [ ] `multiarray/mapping.c` — basic indexing (view, propagate mask
-        trivially), advanced/fancy + boolean indexing (copy — build new mask
+- [ ] **6 — Indexing**
+  - [ ] `multiarray/mapping.c` — basic indexing already covered in phase 2;
+        advanced/fancy + boolean indexing (copy — build new mask
         explicitly), assignment through indexing
-- [ ] **6 — Sort / search**
+- [ ] **7 — Search** (sort/partition covered in phase 2; this is the rest)
   - [ ] `npysort/*.c.src`, `multiarray/item_selection.c`
-        (`sort`/`argsort`/`partition`/`take`/`put`/`choose`/`repeat`)
-- [ ] **7 — Combine / split**
+        (`searchsorted`, `take`/`put`/`choose`/`repeat`)
+- [ ] **8 — Combine / split**
   - [ ] `multiarray/multiarraymodule.c` (`concatenate`)
   - [ ] `multiarray/item_selection.c` (`repeat`, `choose`)
-- [ ] **8 — Linear algebra**
+- [ ] **9 — Linear algebra**
   - [ ] `umath/matmul.c.src`
   - [ ] `numpy/linalg/umath_linalg.c.src` (likely: refuse/raise on masked
         input rather than trying to propagate through LAPACK calls)
-- [ ] **9 — Casting**
+- [ ] **10 — Casting**
   - [ ] `multiarray/convert_datatype.c`, `multiarray/convert.c`
-- [ ] **10 — Python-level surface**
+- [ ] **11 — Python-level surface**
   - [ ] `numpy/_core/arrayprint.py` (repr/str show masked cells)
   - [ ] `numpy/lib/_arraysetops_impl.py` (`unique`/`isin` mask-awareness)
   - [ ] `multiarray/methods.c` (`__reduce__`/pickle, `tobytes`/`tofile`)
   - [ ] `multiarray/buffer.c` (buffer protocol — decide: expose data only,
         or refuse when masked)
-- [ ] **11 — Benchmarking**
+- [ ] **12 — Benchmarking**
   - Relevant `asv` files: `benchmarks/benchmarks/bench_core.py`,
     `bench_indexing.py`, `bench_ufunc.py`, `bench_ufunc_strides.py`
     (contiguous vs. strided — the one closest to the fast/fallback path
@@ -245,8 +275,8 @@ tests from scratch.
   - [ ] Contiguous masked path: confirm near-native speed vs. plain op
         (AVX-512 available)
   - [ ] Non-contiguous masked path: measure, document expected slowdown
-- [ ] **12 — Testing**
-  - [ ] Mask never silently lost across every op in phases 2–10
+- [ ] **13 — Testing**
+  - [ ] Mask never silently lost across every op in phases 2–11
         (the `numpy.ma`-style leak bugs this design is meant to avoid)
   - [ ] `mask->mask == NULL` invariant enforced everywhere a mask is attached
   - [ ] ASAN/UBSAN clean on the new field's lifetime (alloc/dealloc/view
