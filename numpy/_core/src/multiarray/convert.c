@@ -683,6 +683,29 @@ decide_view_dtype_path(
 }
 
 
+static int
+_propagate_view_mask_if_same_topology(PyArrayObject *self,
+                                       PyArrayObject *view)
+{
+    if (PyArray_MASK(self) == NULL ||
+            PyArray_ITEMSIZE(self) != PyArray_ITEMSIZE(view) ||
+            PyArray_NDIM(self) != PyArray_NDIM(view) ||
+            !PyArray_CompareLists(PyArray_DIMS(self), PyArray_DIMS(view),
+                                  PyArray_NDIM(self))) {
+        return 0;
+    }
+
+    PyObject *mask_view = PyArray_View(
+            (PyArrayObject *)PyArray_MASK(self), NULL, &PyArray_Type);
+    if (mask_view == NULL) {
+        return -1;
+    }
+    if (PyArray_SetMaskObject(view, mask_view) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 /*NUMPY_API
  * View
  * steals a reference to type -- accepts NULL
@@ -724,19 +747,20 @@ PyArray_View(PyArrayObject *self, PyArray_Descr *type, PyTypeObject *pytype)
          * dtype can change the element count/shape, and there's no
          * obviously-correct mask reshape for that case yet.
          */
-        if (PyArray_MASK(self) != NULL) {
-            PyObject *mask_view = PyArray_View(
-                    (PyArrayObject *)PyArray_MASK(self), NULL, &PyArray_Type);
-            if (mask_view == NULL) {
-                Py_DECREF(view);
-                return NULL;
-            }
-            if (PyArray_SetMaskObject((PyArrayObject *)view, mask_view) < 0) {
-                Py_DECREF(view);
-                return NULL;
-            }
+        if (_propagate_view_mask_if_same_topology(
+                self, (PyArrayObject *)view) < 0) {
+            Py_DECREF(view);
+            return NULL;
         }
         return view;
+    }
+
+    if (PyArray_MASK(self) != NULL) {
+        PyErr_SetString(PyExc_ValueError,
+                "dtype-changing views are unsupported for masked arrays. "
+                "Use astype() if a dtype conversion is required while "
+                "preserving mask semantics.");
+        return NULL;
     }
 
     /*
@@ -782,9 +806,18 @@ PyArray_View(PyArrayObject *self, PyArray_Descr *type, PyTypeObject *pytype)
             return NULL;
         }
         /* Take view with old or adjusted dims (steals reference to type) */
-        return PyArray_NewFromDescr_int(
+        PyObject *view = PyArray_NewFromDescr_int(
             subtype, type, newnd, newdims, newstrides, PyArray_DATA(self),
             flags, (PyObject *)self, (PyObject *)self, 0);
+        if (view == NULL) {
+            return NULL;
+        }
+        if (_propagate_view_mask_if_same_topology(
+                self, (PyArrayObject *)view) < 0) {
+            Py_DECREF(view);
+            return NULL;
+        }
+        return view;
     }
     /*
      * Other paths: first create a view with the old dtype.
@@ -844,6 +877,11 @@ PyArray_View(PyArrayObject *self, PyArray_Descr *type, PyTypeObject *pytype)
             Py_CLEAR(ret);
             goto finish;
         }
+    }
+
+        if (_propagate_view_mask_if_same_topology(
+            self, (PyArrayObject *)ret) < 0) {
+        Py_CLEAR(ret);
     }
 
 finish:

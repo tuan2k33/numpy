@@ -460,6 +460,8 @@ def _broadcast_to(array, shape, subok, readonly):
         # never really has writebackifcopy semantics
         broadcast = it.itviews[0]
     result = _maybe_view_as_subclass(array, broadcast)
+    if array.mask is not None:
+        result.mask = np.broadcast_to(array.mask, result.shape)
     # In a future version this will go away
     if not readonly and array.flags._writeable_no_warn:
         result.flags.writeable = True

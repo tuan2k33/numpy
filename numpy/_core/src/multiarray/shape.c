@@ -770,6 +770,19 @@ PyArray_Transpose(PyArrayObject *ap, PyArray_Dims *permute)
     }
     PyArray_UpdateFlags(ret, NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_F_CONTIGUOUS |
                         NPY_ARRAY_ALIGNED);
+
+    if (PyArray_MASK(ap) != NULL) {
+        PyObject *mask_transposed = PyArray_Transpose(
+                (PyArrayObject *)PyArray_MASK(ap), permute);
+        if (mask_transposed == NULL) {
+            Py_DECREF(ret);
+            return NULL;
+        }
+        if (PyArray_SetMaskObject(ret, mask_transposed) < 0) {
+            Py_DECREF(ret);
+            return NULL;
+        }
+    }
     return (PyObject *)ret;
 }
 

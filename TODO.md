@@ -5,23 +5,53 @@ Research fork: give `ndarray` a built-in, opt-in `mask` so operators only need
 **numpy `main`/dev only** (currently `2.6.0.dev0`); no backport to released
 branches. Track upstream and rebase periodically rather than diverging long-term.
 
+Design rules live in [`DESIGN.md`](DESIGN.md). This file is the working
+roadmap and validation record.
+
 ## Housekeeping
 
-- [ ] Pull from `origin/main` every day and before every push — this is a long-running fork of a fast-moving codebase, drift compounds fast if skipped.
+- [ ] After every phase implementation, cross-test (pipenv/devenv,
+  mask/nomask), review [`DESIGN.md`](DESIGN.md), and check relevant NumPy
+  NEPs/current `main` behavior for dispatch, dtype, iterator, and array API
+  changes. Verify no regression, leakage, or plain-array behavior change.
+- [ ] Pull from upstream NumPy's `origin/main` every day and before every
+  push. Do not use the personal fork's `fork/main` as the synchronization
+  source — this is a long-running fork of a fast-moving codebase, so drift
+  compounds fast if skipped.
 
-## Regression baseline: Phase 0 vs. Phase 1
+## Regression baseline
 
 `mask == NULL` must keep every existing code path byte-identical to
 upstream. Tracking the actual pass counts here after each phase, not just
 inside the phase's checklist, so drift is easy to spot at a glance:
 
-| Phase | `test_multiarray.py` | `test_indexing.py` | Combined total | Match previous row? |
-|---|---|---|---|---|
-| 0 — baseline (no code changes) | 14810 passed, 17 skipped, 12 deselected | 106 passed | 14916 passed, 17 skipped, 12 deselected | — |
-| 1 — `mask` field added | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
-| 2 — copy/view/reshape/sort mask propagation | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
-| 3 — ufunc dispatch (arithmetic/trig/comparisons) | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
-| 4 — reduce/accumulate/reduceat/outer/at + `where=` merge fix | *(run combined, no per-file split)* | *(run combined, no per-file split)* | 14916 passed, 17 skipped, 12 deselected | ✅ identical |
+Current focus:
+
+- **Phase 6:** implement advanced/fancy and boolean indexing.
+- **Phase 7:** implement gather, scatter, and combine/split operations.
+- Phase 5 is complete; keep the cross-test, design review, NEP review, and
+  plain-array baseline as the gate for every change.
+
+- **Phase 0 — baseline (no code changes)**
+  - `test_multiarray.py`: 14810 passed, 17 skipped, 12 deselected.
+  - `test_indexing.py`: 106 passed.
+  - Combined: 14916 passed, 17 skipped, 12 deselected.
+- **Phase 1 — `mask` field added**
+  - Combined: 14916 passed, 17 skipped, 12 deselected.
+  - Match with phase 0: ✅ identical.
+- **Phase 2 — copy/view/reshape/sort mask propagation**
+  - Combined: 14916 passed, 17 skipped, 12 deselected.
+  - Match with the previous row: ✅ identical.
+- **Phase 3 — ufunc dispatch**
+  - Combined: 14916 passed, 17 skipped, 12 deselected.
+  - Match with the previous row: ✅ identical.
+- **Phase 4 — reductions and `where=` merge fix**
+  - Combined: 14916 passed, 17 skipped, 12 deselected.
+  - Match with the previous row: ✅ identical.
+- **Phase 5 — transpose and broadcast mask transport**
+  - Related suites: 15380 passed, 17 skipped, 12 deselected.
+  - Includes `test_shape_base.py`, `test_stride_tricks.py`, and mask tests.
+  - Match with the plain-array baseline: ✅ no regression.
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
@@ -31,174 +61,12 @@ also reran `test_umath.py` + `test_ufunc.py` (the phase-3 baseline files from
 the mapping table below) as an additional no-mask regression check: 5615
 passed, 60 skipped, 7 xfailed, all pre-existing (not new).
 
-## Scope: which problem this solves
+## Design reference
 
-Two different usecases get called "masked array" and demand different designs:
-
-1. **Genuinely missing data** — the value never existed / is unknown. MISSING
-   semantics (R/SQL `NULL`). This is what the `nulldtype` bitpattern project
-   (sibling, separate repo) solves — there, "hiding" a value **destroys** the
-   old one (not observable afterwards), which is correct for this case: the
-   whole point is nobody should be able to recover a value nobody ever knew.
-2. **Complete data, selectively hidden** — the value is real and known, just
-   excluded from a given view/computation for some reason: license/access
-   control (redact a column for one audience, not another), an algorithm that
-   needs to vary which elements are visible (dropout, k-fold
-   cross-validation, random subsampling), etc.
-
-**This fork targets case 2.** Case 1 is deliberately out of scope for now —
-revisit later if it turns out to matter here too. This is exactly why
-flag-layout (not bitpattern) is the right shape for this work: nothing about
-`T`'s value range is sacrificed, hiding is non-destructive/reversible, and
-because `mask` lives on the array *object* (not the data buffer), several
-views can share one data buffer under *different* masks at once — e.g. two
-users seeing different redactions of the same underlying array, or two CV
-folds masking the same dataset differently — with no data copy. Worth
-testing explicitly once views are implemented (phase 2): construct two views
-over the same `base` data with different masks and confirm they don't
-interfere with each other.
-
-## Settled design decisions
-
-- `PyArrayObject` gets one new field: `PyArrayObject *mask;` — `NULL` by
-  default. Same self-referential-pointer pattern the struct already uses for
-  `base`; no size/recursion issue.
-- `mask` is a **plain `ndarray` of dtype `bool`** (byte per element), *not*
-  bit-packed in storage. This makes it inherit numpy's existing view/stride
-  machinery for free — slicing, transposing, broadcasting the parent array
-  slices/transposes/broadcasts the mask the same way, no custom bit-stride
-  logic needed.
-- Invariant: `mask->mask` must always be `NULL` (no masked masks) — enforced
-  by usage-tracking, not by dtype. An earlier version of this fix tried "an
-  array of dtype `bool` can never itself carry a mask" as a structural
-  shortcut, but that's actually wrong: mask arrays are always bool, but not
-  every bool array *is* a mask — comparison ufuncs (`a < b`, phase 3) produce
-  ordinary bool arrays that must still be allowed to carry their own mask
-  when they aren't currently serving as anyone else's. The real invariant is
-  usage-based: an array cannot receive a mask *while it is currently in use
-  as some other array's mask*, tracked via the internal `NPY_ARRAY_IS_MASK`
-  flag (`arrayobject.h`), set when attached and cleared when detached or
-  replaced. A plain "reject if `obj->mask != NULL` at attach" check (checking
-  only the incoming candidate) has a point-in-time hole: nothing stops
-  attaching a mask to `obj` *after* it's already serving as another array's
-  mask (`arr.mask.mask = x` would still nest). Checking the flag on the
-  *receiver* (`arr`, not just the incoming `obj`) at attach time closes that
-  hole — see phase 2/3 checklists. Not refcounted: sharing the exact same
-  mask object (by identity, not via `.view()` of it) across more than one
-  owner is an accepted edge case where detaching from one owner clears the
-  flag even if another owner still references it — a niche, undesigned-for
-  usage, not the `.view()`-based per-owner sharing phase 2 actually relies on.
-- Refcounting on `mask` follows the existing convention for `base`
-  (`Py_INCREF`/`Py_DECREF` at the same points).
-- **No mask (`mask == NULL`)**: goes through the exact current code path,
-  unchanged. Only added cost is one pointer NULL-check per call, outside any
-  loop. Must measure as zero regression vs. upstream.
-- **Has mask, contiguous, AVX-512 available**: fast path. Load data + byte
-  mask contiguously, convert byte-mask → k-register in-register
-  (`VPMOVB2M`-class instruction, ~free), then masked load/compute/store via
-  AVX-512 predicated ops. Single pass, no separate NA-scan pass.
-- **Has mask, non-contiguous or no AVX-512**: fallback through the generic
-  strided loop (`NpyIter`), mask read via ordinary strided/gather access at
-  byte granularity — never attempt bit-level gather.
-- **Dispatch check lives in one shared place**: `umath/ufunc_object.c` +
-  `umath/dispatching.c` (NEP 43 DType-based dispatch), not duplicated per
-  Python function the way `numpy.ma` does it. This is what makes every ufunc
-  get mask support "for free" instead of hand-writing each one.
-- Reuse numpy's existing `NPY_CPU_DISPATCH` / universal SIMD infra
-  (`numpy/_core/src/common/simd/`) to add the AVX-512 masked variant per loop
-  rather than building runtime CPU dispatch from scratch.
-
-## Mask semantics and propagation
-
-- mask == NULL means unmasked / ordinary ndarray.
-- mask[i] == False means visible; mask[i] == True means hidden.
-- Mask affects observability, not computation: underlying data is always
-  computed exactly as in normal NumPy.
-- Every non-NULL mask is a plain bool ndarray with exactly the same shape
-  as its owner and mask == NULL itself.
-- Elementwise operations propagate masks by OR after normal NumPy
-  broadcasting.
-- Views transform the mask using exactly the same indexing/striding
-  transformation as the data; masks are not eagerly copied.
-- Operations that permute/select elements must apply the same permutation
-  or index mapping to the mask.
-- Reductions preserve existing NumPy output shape/type semantics. Their
-  output mask is the OR reduction of the masks of all input elements
-  contributing to each output element.
-- If all contributing inputs are unmasked, the result mask remains NULL.
-- Scalar results preserve their normal NumPy scalar type; masked scalar
-  results carry mask state rather than becoming None.
-- Mask propagation is separate from output/observability policy. Data is
-  fully computed; masked values are suppressed only at defined output
-  boundaries.
-- No operation may change ndarray shape, dtype, broadcasting rules, or
-  ordinary unmasked usage merely because masks are enabled.
-- `.copy()` deep-copies the mask into an independent buffer, exactly like it
-  deep-copies data; `.view()`/basic slicing instead transform the mask via
-  the identical indexing/striding operation applied to data, sharing the
-  underlying mask buffer (consistent with "not eagerly copied" below). Two
-  independent views can still carry independently-assigned masks — rebinding
-  `view.mask = new_arr` only affects that view — while in-place mutation of a
-  *shared* mask buffer through one view is visible through any other view
-  sharing it, mirroring ordinary data-view semantics.
-
-## Unmasked representation
-
-- A newly created ordinary ndarray has `mask == NULL`.
-- `mask == NULL` is the canonical representation of an entirely unmasked
-  array; it is semantically equivalent to an all-False mask, but an
-  all-False mask must never be materialized merely to represent the
-  unmasked state.
-- External mask assignment (`arr.mask = m`, `PyArray_SetMaskObject`) must
-  canonicalize an all-False `m` down to `NULL` — a one-time scan cost paid
-  at assignment, not a maintained invariant re-checked per-op.
-- Internal mask propagation (view/copy/elementwise/reduction results) should
-  preserve `NULL` whenever the result is provably unmasked from its inputs'
-  `NULL`-ness alone, and should avoid a full-mask scan solely to canonicalize
-  an already-non-NULL mask that happens to be all-False — only the external
-  assignment path pays that scan cost.
-- Operations whose inputs all have `mask == NULL` must produce
-  `mask == NULL`.
-- `mask == NULL` is therefore both a semantic state and the fast path.
-
-## Goal: no rebuild required for plain-array users
-
-Anyone *not* touching masked arrays should be unaffected without rebuilding
-anything of theirs:
-
-- **Packages precompiled against stock numpy** (pandas, scipy, any wheel
-  using `PyArray_DATA`/accessor macros) must keep working unmodified against
-  this fork's numpy. This falls out of the existing version-negotiation in
-  `import_array()`: an extension declares "I need API version ≤ X", the
-  runtime declares "I provide version ≥ X" — compatible, no rebuild. Must
-  hold as an invariant through every phase: `mask` is purely additive, gated
-  behind a version strictly newer than anything existing code could request
-  (phase 1), and `mask == NULL` behavior is byte-identical to upstream.
-- **Someone who wants masked arrays from Python**: no rebuild at all — just
-  run on this fork's already-built numpy and call the new Python-level API.
-  Same as adopting any new feature in a new numpy release.
-- **Someone who wants to touch `mask` from their own C extension**: *they*
-  rebuild *their* extension against this fork's headers — not numpy itself
-  (already built). Never the other direction.
-
-## Backward compatibility of adding a struct field
-
-Checked against the actual header (`ndarraytypes.h:787-857`): this is safer
-than a naive "patching a public C struct always breaks ABI" take suggests.
-`PyArrayObject_fields` (the real struct) is already hidden behind an opaque
-`PyArrayObject` typedef for any external code that sets
-`NPY_NO_DEPRECATED_API` (recommended since NumPy 1.7, 2013) — such code only
-touches the array via `PyArray_DATA`/`PyArray_NDIM`/etc., which resolve
-through the `PyArray_API` function-pointer table at runtime, not hardcoded
-offsets. There's direct precedent: `_buffer_info` was added at
-`NPY_1_20_API_VERSION` and `mem_handler` at `NPY_1_22_API_VERSION`, both
-gated the same way `mask` will be (see phase 1).
-
-Net effect: source code using the accessor API is unaffected. Old
-*precompiled* wheels that read fields directly (`arr->data` without the
-deprecated-API guard) would break at runtime against a numpy built with the
-new field — same risk numpy itself already accepted twice for `_buffer_info`
-and `mem_handler`, not a new category of risk this project introduces.
+The scope, invariants, mask propagation rules, unmasked representation,
+compatibility requirements, and NEP alignment are maintained in
+[`DESIGN.md`](DESIGN.md). Update that file when a design decision changes;
+keep this file focused on implementation phases and validation.
 
 ## Existing test suites to reuse as templates / regression baseline
 
@@ -207,15 +75,42 @@ numpy test files cover the same ground and should be mined per phase — either
 as a pattern to copy for the masked case, or as the no-mask regression
 baseline that must keep passing unchanged:
 
-| Phase | Template / baseline file | Why |
-|---|---|---|
-| 2 — ufunc dispatch | `numpy/_core/tests/test_umath.py` (5474 lines), `test_ufunc.py` (3523 lines) | Per-ufunc correctness tests; run unmodified against `mask=None` as the zero-regression check; mine for cases to duplicate with a masked operand |
-| 3 — reductions | `numpy/_core/tests/test_umath.py` (reduce/accumulate sections), `numpy/ma/tests/test_core.py` (`MaskedArray.sum`/`mean`/etc semantics — closest prior art for what "reduce over a gap" should mean) | `numpy.ma`'s reduction semantics are the direct precedent to compare against/diverge from deliberately |
-| 4 — view propagation | `numpy/_core/tests/test_shape_base.py`, `numpy/ma/tests/test_subclassing.py` (469 lines — how `numpy.ma` keeps `.mask` attached through view ops, and where it historically didn't) | `test_subclassing.py` is effectively a list of past leak bugs to not repeat |
-| 5 — indexing | `numpy/_core/tests/test_indexing.py` (1717 lines) | Most thorough existing coverage of basic/advanced/boolean indexing edge cases |
-| 6 — sort/search | `numpy/_core/tests/test_item_selection.py` (178 lines) | Covers `take`/`put`/`choose`/`repeat`; small, good starting template |
-| 9 — casting | `numpy/_core/tests/test_multiarray.py` (12122 lines, has `astype`/casting sections) | Largest file — grep for `astype`/`can_cast` sections rather than reading whole file |
-| 10 — Python surface | `numpy/ma/tests/test_core.py` (6276 lines), `test_old_ma.py` (939 lines), `test_mrecords.py` (513 lines), `test_deprecations.py`, `test_regression.py` | The full `numpy.ma` suite — closest thing to "what a masked-array test suite looks like end to end"; also the best source of regression cases for exactly the leak/surprise bugs this design is meant to avoid |
+- **Phase 3 — ufunc dispatch**
+  - Files: `numpy/_core/tests/test_umath.py` (5474 lines) and
+    `test_ufunc.py` (3523 lines).
+  - Use them for per-ufunc correctness and the unmodified `mask=None`
+    regression check. Mine them for masked-operand cases.
+- **Phase 4 — reductions**
+  - Files: reduction/accumulate sections in
+    `numpy/_core/tests/test_umath.py` and
+    `numpy/ma/tests/test_core.py`.
+  - The `numpy.ma` reduction semantics are the direct precedent to compare
+    against or deliberately diverge from.
+- **Phase 5 — view propagation**
+  - Files: `numpy/_core/tests/test_shape_base.py` and
+    `numpy/ma/tests/test_subclassing.py` (469 lines).
+  - The subclassing tests are effectively a list of past propagation bugs to
+    avoid repeating.
+- **Phase 6 — indexing**
+  - File: `numpy/_core/tests/test_indexing.py` (1717 lines).
+  - It has the most thorough coverage of basic, advanced, and boolean
+    indexing edge cases.
+- **Phase 7 — gather, scatter, and combine**
+  - File: `numpy/_core/tests/test_item_selection.py` (178 lines).
+  - It covers `take`/`put`/`choose`/`repeat` and is a small starting template.
+- **Phase 8 — casting**
+  - File: `numpy/_core/tests/test_multiarray.py` (12122 lines).
+  - Grep for the `astype` and `can_cast` sections rather than reading the
+    whole file.
+- **Phase 9 — linear algebra**
+  - Files: `umath/matmul.c.src` and `numpy/linalg/umath_linalg.c.src`.
+  - Decide whether masked LAPACK input should be rejected or propagated.
+- **Phase 10 — Python surface**
+  - Files: `numpy/ma/tests/test_core.py` (6276 lines), `test_old_ma.py`
+    (939 lines), `test_mrecords.py` (513 lines), `test_deprecations.py`, and
+    `test_regression.py`.
+  - The full `numpy.ma` suite is the closest example of an end-to-end masked
+    array test suite and a source of leak/surprise regression cases.
 
 `numpy/ma/tests/` in particular is worth a full pass before writing any new
 test: most of its ~7800 lines encode a real bug or surprising-behavior
@@ -225,12 +120,15 @@ tests from scratch.
 
 ## Phases
 
+<details>
+<summary>Completed phases 0–4</summary>
+
 - [x] **0 — Setup**
   - [x] New branch `refactor/ndarray-mask` off freshly-pulled `main`
         (didn't reuse `enh/mean-var-non-legacy-dtype`)
   - [x] Confirmed build config / baseline against numpy `main` — see the
         "Regression baseline" table above (row 0)
-- [x] **1 — Struct & invariants** (done on `refactor/ndarray-mask`)
+- [x] **1 — Struct, invariants, and minimal Python API**
   - [x] Added `NPY_2_7_API_VERSION 0x00000017` (`numpyconfig.h`), bumped
         `C_API_VERSION` in `numpy/_core/meson.build` (header-only change,
         same md5 in `cversions.txt` reused — no C-API function table
@@ -310,10 +208,9 @@ tests from scratch.
         indexing (slices/integers/newaxis/ellipsis, no fancy component)
         in `mapping.c`'s `array_subscript`/`array_item_asarray` replays
         the identical parsed indices against the mask. Dtype-changing
-        `.view(new_dtype)` does not propagate the mask yet (element
-        count/shape can change under a dtype view; no obviously-correct
-        mask reshape for that case) — noted as a follow-up nuance, not a
-        phase-2 blocker. Fancy/boolean indexing is still phase 6.
+        `.view(new_dtype)` is handled in phase 5: it is rejected for masked
+        arrays; use `astype()` to preserve mask semantics.
+        Fancy/boolean indexing is still phase 6.
   - [x] `reshape()`/`ravel()`/`squeeze()` (`shape.c`): `_reshape_with_copy_arg`
         recurses `PyArray_Newshape` onto the mask itself (reusing its own
         view-if-possible/copy-if-needed logic rather than re-deriving
@@ -337,8 +234,8 @@ tests from scratch.
         partition's O(n) advantage when masked — threading a companion
         mask buffer through every swap of every backend
         (quicksort/timsort/heapsort × dtype in `npysort/*.c.src`) is a
-        real performance project, deferred to phase 12/13, not required
-        for phase 2's correctness goal. `argsort()`/`argpartition()`
+        real performance project, not required for phase 2's correctness
+        goal. `argsort()`/`argpartition()`
         need no changes: they return an index array, not a masked array.
   - [x] Regression tests: `numpy/_core/tests/test_mask.py` (new file) —
         invariant/canonicalization tests, copy/view/slice mask
@@ -371,7 +268,7 @@ tests from scratch.
         (`divmod`) and `out=`/in-place operators (`+=`) — the output object
         already gets fully overwritten either way, so replacing its mask
         the same way is safe. gufuncs (`ufunc->core_enabled`, e.g. `matmul`)
-        are excluded (phase 9).
+        are excluded (the linear-algebra phase).
   - [x] **Found and fixed a real bug in phase 2's invariant while
         implementing this**: comparison ufuncs (`a < b`) produce bool-dtype
         output, but phase 2's "hardened" invariant was a blanket "no bool
@@ -419,7 +316,7 @@ tests from scratch.
         4 tests covering the `merge_where` selective-write behavior (with
         and without a pre-existing `out` mask) and the two narrower
         remaining gaps (`out=None`, multi-output).
-- [x] **4 — Reductions / accumulate**
+- [x] **4 — Reduction family and indexed updates**
   - [x] **Convention (settled after design discussion): run the identical
         reduce-like call again with `logical_or` substituted for the data
         ufunc, on the mask(s) instead of the data**, rather than
@@ -505,133 +402,104 @@ tests from scratch.
         the `.at()` in-place-mutate-existing-mask path, and the
         where-merge old-mask replacement path (old mask correctly
         dereferenced, not leaked, when replaced).
-- [ ] **5 — Further view propagation** (basic reshape/view covered in
-        phase 2 already; this is the rest)
-  - [ ] `multiarray/getset.c` (`.T` and friends)
-  - [ ] `multiarray/ctors.c` (`broadcast_to`)
-  - [ ] **Low-priority perf backlog, not phase 5's actual scope** (from
-        `BENCHMARKS.md`'s same-build masked-vs-unmasked numbers — real,
-        direction-consistent overhead across reruns, not noise; attempted
-        mid-session and reverted, see below, not yet actually
-        implemented). **Deliberately downgraded**: the current design
-        throughout phases 1-4 is exactly
 
-        ```
-        data
-          ↓
-        existing NumPy machinery
-          ↓
-        correct result
+    </details>
 
-        mask
-          ↓
-        existing NumPy machinery
-          ↓
-        correct mask
-        ```
-
-        i.e. every mask operation reuses an *already-correct, already-
-        tested* piece of NumPy (`logical_or.reduce`/`.accumulate`/`.at`/
-        `PyNumber_Or`/`PyArray_Where`/...) instead of hand-rolled loops --
-        this is what makes phases 1-4's correctness easy to trust and
-        cheap to leak-check. Every item below trades that away for speed
-        by fusing mask logic into shared, delicate, correctness-critical
-        NumPy internals (`NpyIter`, `PyArrayMapIterObject`, SIMD/scalar
-        dtype loops). Not worth doing until the feature is functionally
-        complete (later phases) and there's a real, profiled need --
-        premature here, and the P2 attempt this session (optimized the
-        wrong function entirely, `PyArray_Std` instead of `_methods.py`)
-        is a concrete example of the kind of mistake this risk trades in
-        for. Revisit only after phases 5-11 land, alongside phase 12/13's
-        planned perf work, not opportunistically mid-phase.
-    - [ ] P0 `add.at` (~+54-170% overhead, worst in the table): loại bỏ
-          hẳn pass `ufunc_at()` thứ hai — fuse mask OR trực tiếp vào cùng
-          vòng lặp index đang có sẵn trong `ufunc_at__fast_iter`/
-          `ufunc_at__slow_iter`/`trivial_at_loop` thay vì gọi lại
-          `logical_or.at()` như 1 lệnh riêng. Rủi ro cao nhất trong nhóm
-          này — code này dùng chung cho *mọi* ufunc's `.at()`, đụng vào
-          `PyArrayMapIterObject`/overlap-copy/buffering, cần review kỹ
-          trước khi merge.
-    - [ ] P1 `add.accumulate` (~+53-71%): fuse running mask OR vào ngay
-          trong inner loop của `PyUFunc_Accumulate` (thêm 1 biến "running
-          OR" song song với "running sum" trong cùng vòng lặp) thay vì gọi
-          `logical_or.accumulate()` như 1 pass riêng. **Thử 1 lần**: fast
-          path cho mask 1-d contiguous (raw C loop OR thay vì gọi lại
-          `PyUFunc_Accumulate`) — đã build/test/leak-check sạch, giảm
-          overhead đo được từ ~53-71% xuống ~14-23%, nhưng **đã revert**
-          theo quyết định của user (muốn gộp lại xử lý 1 lần cùng P0/P3
-          thay vì làm rời rạc từng phase nhỏ) — code fast-path cụ thể
-          không còn trong repo, nhưng hướng đi này đã verify khả thi, có
-          thể làm lại nguyên xi khi quay lại phase này.
-    - [ ] P2 `.std()`/`.var()` (~+33-320%, biến động mạnh nhất): **thử 1
-          lần và sai chỗ** — tối ưu nhắm vào `PyArray_Std`/
-          `__New_PyArray_Std` (`multiarray/calculation.c`), nhưng
-          `ndarray.std()`/`.var()` từ Python thực ra forward sang
-          `numpy/_core/_methods.py::_std`/`_var` (`NPY_FORWARD_NDARRAY_METHOD`
-          trong `methods.c`), không hề gọi `PyArray_Std`. Code C đã sửa
-          build/test sạch nhưng không cải thiện benchmark thật (đã
-          revert). **Làm đúng lần sau phải sửa ở `_methods.py`**: tính
-          `logical_or.reduce(arr.mask, axis, where=where)` một lần đầu
-          hàm, chạy toàn bộ chain `umr_sum`/`subtract`/`square` trên 1
-          view đã tháo mask (`arr.view(); arr.mask = None`), gắn mask cuối
-          cùng vào `ret`. Cần cẩn thận với `where=`/`keepdims`/`mean=`
-          kwarg và nhánh phức số của hàm gốc.
-    - [ ] P3 elementwise `add`/`less` (~+13-65%): fuse mask propagation
-          vào chính SIMD/scalar inner loop (`umath/loops*.c.src`) thay vì
-          gọi `PyNumber_Or` như 1 pass riêng sau khi
-          `ufunc_generic_fastcall` đã chạy xong. Đây chính là việc
-          "AVX-512 masked loop" đã ghi trong "Settled design decisions" từ
-          đầu — phạm vi lớn nhất trong nhóm P0-P4 (đụng NEP 43
-          dtype/loop-resolution + mọi dtype loop của mọi ufunc), nên vẫn
-          để dành cho phase tối ưu riêng (12/13), không tranh thủ làm lẻ
-          tẻ ở đây.
-    - [ ] P4 `add.reduceat`/`add.outer` (~+7-103%): chưa quyết định hướng
-          — cần profile trước (xác định OR-mask pass hay phần dispatch
-          machinery chiếm phần lớn overhead) rồi mới chọn cách tối ưu,
-          không đoán mò như P2 đã vấp phải.
+- [x] **5 — Core transport completion** (follow-up to phase 2)
+  - [x] `multiarray/getset.c` (`.T`, transpose, and axis operations)
+  - [x] `numpy/lib/_stride_tricks_impl.py` (`broadcast_to`)
+      - [x] Dtype-changing `.view()` on a masked array raises a clear error;
+        use `astype()` when preserving mask semantics through conversion.
 - [ ] **6 — Indexing**
   - [ ] `multiarray/mapping.c` — basic indexing already covered in phase 2;
         advanced/fancy + boolean indexing (copy — build new mask
         explicitly), assignment through indexing
-- [ ] **7 — Search** (sort/partition covered in phase 2; this is the rest)
+- [ ] **7 — Gather, scatter, and combine/split**
+  - [ ] Depends on phase 6's index-mapping and assignment semantics.
   - [ ] `npysort/*.c.src`, `multiarray/item_selection.c`
         (`searchsorted`, `take`/`put`/`choose`/`repeat`)
-- [ ] **8 — Combine / split**
-  - [ ] `multiarray/multiarraymodule.c` (`concatenate`)
-  - [ ] `multiarray/item_selection.c` (`repeat`, `choose`)
-- [ ] **9 — Linear algebra**
-  - [ ] `umath/matmul.c.src`
-  - [ ] `numpy/linalg/umath_linalg.c.src` (likely: refuse/raise on masked
-        input rather than trying to propagate through LAPACK calls)
-- [ ] **10 — Casting**
+  - [ ] `multiarray/multiarraymodule.c` (`concatenate`, split/stack APIs)
+- [ ] **8 — Casting**
   - [ ] `multiarray/convert_datatype.c`, `multiarray/convert.c`
-- [ ] **11 — Python-level surface**
+  - [ ] Cover `astype`, dtype conversion, and related casting APIs before
+        implementing linear algebra.
+- [ ] **9 — Linear algebra**
+  - [ ] Decide whether masked `matmul`/LAPACK input is rejected, ignored, or
+        propagated before changing the implementation.
+  - [ ] `umath/matmul.c.src`
+  - [ ] `numpy/linalg/umath_linalg.c.src`
+- [ ] **10 — Python-level surface**
   - [ ] `numpy/_core/arrayprint.py` (repr/str show masked cells)
   - [ ] `numpy/lib/_arraysetops_impl.py` (`unique`/`isin` mask-awareness)
   - [ ] `multiarray/methods.c` (`__reduce__`/pickle, `tobytes`/`tofile`)
   - [ ] `multiarray/buffer.c` (buffer protocol — decide: expose data only,
         or refuse when masked)
-- [ ] **12 — Benchmarking**
-  - Relevant `asv` files: `benchmarks/benchmarks/bench_core.py`,
-    `bench_indexing.py`, `bench_ufunc.py`, `bench_ufunc_strides.py`
-    (contiguous vs. strided — the one closest to the fast/fallback path
-    split), `bench_array_coercion.py`.
-  - `spin bench -t <name>` is slow by design (asv calibrates + repeats each
-    benchmark in its own subprocess; `bench_ufunc_strides` alone is a
-    dtype × stride × op matrix, hundreds of parameter combos).
-    **Phase 0 baseline: run full (no `-q`)** — done below, this is the
-    number everything else compares against. **Phase 1 onward, during
-    day-to-day development: `spin bench -q -t <name>`** (quick, one run, no
-    calibration) for "did I break something" checks. Only drop back to a
-    full (no `-q`) run for the real before/after comparison once a phase's
-    masked path is actually implemented and ready to judge.
-  - [ ] No-mask path: confirm zero measurable regression vs. upstream `main`
-  - [ ] Contiguous masked path: confirm near-native speed vs. plain op
-        (AVX-512 available)
-  - [ ] Non-contiguous masked path: measure, document expected slowdown
-- [ ] **13 — Testing**
-  - [ ] Mask never silently lost across every op in phases 2–11
-        (the `numpy.ma`-style leak bugs this design is meant to avoid)
-  - [ ] `mask->mask == NULL` invariant enforced everywhere a mask is attached
-  - [ ] ASAN/UBSAN clean on the new field's lifetime (alloc/dealloc/view
-        chains)
+
+No separate benchmarking or final testing phase is tracked here. The
+cross-test requirement in the housekeeping section is the per-phase gate:
+after each implementation step, rerun the relevant regression checks and the
+plain-array baseline to confirm no masked-path or no-mask regression.
+
+## Note / known limitation
+
+<details>
+<summary>Performance backlog (not an active phase)</summary>
+
+This is a low-priority performance backlog, not part of phase 5's actual scope.
+
+The current design throughout phases 1-4 is exactly:
+
+```
+data
+  ↓
+existing NumPy machinery
+  ↓
+correct result
+
+mask
+  ↓
+existing NumPy machinery
+  ↓
+correct mask
+```
+
+In other words, every mask operation reuses an already-correct, tested piece
+of NumPy (`logical_or.reduce`, `logical_or.accumulate`, `logical_or.at`,
+`PyNumber_Or`, `PyArray_Where`, and so on) instead of hand-rolled loops.
+This makes phases 1-4 easy to trust and cheap to leak-check.
+
+Every item below trades that simplicity for speed by fusing mask logic into
+shared, delicate, correctness-critical NumPy internals (`NpyIter`,
+`PyArrayMapIterObject`, SIMD, and scalar dtype loops). This is not worth doing
+until the feature is functionally complete and there is a measured need.
+The earlier attempt to optimize `PyArray_Std` instead of the Python method
+path is a concrete example of the risk. Revisit these items only after phases
+5-10 are complete, not opportunistically mid-phase.
+
+- **P0 `add.at` (~+54-170% overhead, worst in the table):** Remove the
+  second `ufunc_at()` pass by fusing mask OR into the existing index loops in
+  `ufunc_at__fast_iter`, `ufunc_at__slow_iter`, and `trivial_at_loop`.
+  This is the highest-risk item because it touches shared `.at()` machinery,
+  `PyArrayMapIterObject`, overlap-copy handling, and buffering.
+- **P1 `add.accumulate` (~+53-71%):** Fuse the running mask OR into
+  `PyUFunc_Accumulate` instead of calling `logical_or.accumulate()` separately.
+  A validated 1-D fast path was reverted so this work can stay consolidated
+  with the other high-risk optimizations.
+- **P2 `.std()`/`.var()` (~+33-320%):** The earlier optimization targeted
+  `PyArray_Std`, but Python's `ndarray.std()` and `ndarray.var()` use
+  `numpy/_core/_methods.py`. It built cleanly but did not improve the real
+  benchmark and was reverted.
+  The correct future approach is to compute
+  `logical_or.reduce(arr.mask, axis, where=where)` once, run the existing
+  arithmetic chain with the mask stripped, and reattach the final mask.
+  Handle `where=`, `keepdims`, `mean`, and complex-valued branches carefully.
+- **P3 elementwise `add`/`less` (~+13-65%):** Fuse propagation into the
+  SIMD or scalar inner loop in `umath/loops*.c.src` instead of calling
+  `PyNumber_Or` after `ufunc_generic_fastcall` has produced the result.
+  This is the real AVX-512 masked-loop work reserved for a dedicated
+  optimization effort.
+- **P4 `add.reduceat`/`add.outer` (~+7-103%):** Profile before choosing a
+  direction. Determine whether the cost comes from the OR-mask pass or the
+  surrounding dispatch machinery; do not optimize this by guesswork.
+
+</details>

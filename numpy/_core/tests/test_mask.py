@@ -653,3 +653,49 @@ class TestMaskReduceLike:
         b = np.array([10, 20])
         np.add.at(a, [0, 1], b)
         assert a.mask is None
+
+
+class TestMaskCoreTransport:
+    """Phase 5: transpose-family and broadcast mask propagation."""
+
+    def _masked_2d(self):
+        a = np.arange(6).reshape(2, 3)
+        a.mask = np.array([[False, True, False], [True, False, False]])
+        return a
+
+    def test_transpose_propagates_mask(self):
+        a = self._masked_2d()
+        assert np.array_equal(a.T.mask, a.mask.T)
+        assert np.array_equal(a.transpose().mask, a.mask.T)
+
+    def test_swapaxes_propagates_mask(self):
+        a = self._masked_2d()
+        result = a.swapaxes(0, 1)
+        assert np.array_equal(result.mask, a.mask.swapaxes(0, 1))
+
+    def test_moveaxis_propagates_mask(self):
+        a = self._masked_2d()
+        result = np.moveaxis(a, 0, 1)
+        assert np.array_equal(result.mask, np.moveaxis(a.mask, 0, 1))
+
+    def test_broadcast_to_propagates_mask(self):
+        a = np.arange(3)
+        a.mask = np.array([False, True, False])
+        result = np.broadcast_to(a, (2, 3))
+        assert result.shape == (2, 3)
+        assert np.array_equal(result.mask, np.broadcast_to(a.mask, (2, 3)))
+
+    def test_same_dtype_view_preserves_mask(self):
+        a = self._masked_2d()
+        result = a.view(a.dtype)
+        assert np.array_equal(result.mask, a.mask)
+
+    def test_dtype_changing_view_is_rejected(self):
+        a = self._masked_2d().astype(np.int32)
+        with pytest.raises(ValueError, match="dtype-changing views are unsupported"):
+            a.view(np.float32)
+
+    def test_topology_changing_dtype_view_is_rejected(self):
+        a = self._masked_2d().astype(np.int64)
+        with pytest.raises(ValueError, match="Use astype\(\)"):
+            a.view(np.int32)
