@@ -39,6 +39,10 @@ PyArray_Resize_int(PyArrayObject *self, PyArray_Dims *newshape, int refcheck)
     npy_intp *dimptr;
     char *new_data;
 
+    if (PyArray_FailIfMaskedInPlace(self, "resize") < 0) {
+        return -1;
+    }
+
     if (!PyArray_ISONESEGMENT(self)) {
         PyErr_SetString(PyExc_ValueError,
                 "resize only works on single-segment arrays");

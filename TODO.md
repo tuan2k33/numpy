@@ -36,7 +36,8 @@ inside the phase's checklist, so drift is easy to spot at a glance:
 Current focus:
 
 - **Phase 6:** done (advanced/fancy and boolean indexing, assignment, `.flat`).
-- **Phase 7:** next — gather, scatter, and combine/split operations.
+- **Phase 7:** done (gather/scatter/combine, in-place mutator guards).
+- **Phase 8:** next — casting audit.
 - Phase 5 is complete (incl. `astype`/`flatten`/`diagonal`/`real`/`imag`); keep the cross-test, design review, NEP review, and
   plain-array baseline as the gate for every change.
 
@@ -81,6 +82,18 @@ Current focus:
     21668 passed, 78 skipped, 12 deselected, 7 xfailed in one combined run
     (superset of the phase 5 groups), 0 failed.
   - `test_mask.py`: 114 passed.
+
+- **Phase 7 — gather, scatter, combine, in-place mutator guards**
+  - `test_multiarray.py` + `test_indexing.py` (`-m "not slow"`): 14937
+    passed, 17 skipped, 12 deselected, 0 failed — ✅ identical to phases 5/6.
+  - `test_umath.py`, `test_ufunc.py`, `test_shape_base.py`,
+    `test_stride_tricks.py`: 6016 passed, 60 skipped, 7 xfailed — ✅ identical.
+  - Widened gate (adds `test_regression`, `test_item_selection` and
+    `numpy/lib/tests/{test_function_base,test_arraysetops,test_index_tricks,
+    test_shape_base,test_twodim_base}.py`, all of which exercise
+    take/put/where/concatenate heavily): 23466 passed, 151 skipped,
+    15 deselected, 7 xfailed, 0 failed.
+  - `test_mask.py`: 148 passed.
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
@@ -510,13 +523,65 @@ tests from scratch.
     structured dtypes (mask is per record; field views and field assignment
     do not carry/update it — see the table); `a.flat = v` (whole-array flat
     assignment); scalar results (`a[i]`, `a.flat[i]`) cannot carry a mask.
-- [ ] **7 — Gather, scatter, and combine/split**
-  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
+- [x] **7 — Gather, scatter, and combine/split**
+  - [x] Sync upstream first (standing rule in Housekeeping): `origin/main`
         merged, `HEAD..origin/main` is 0.
-  - [ ] Depends on phase 6's index-mapping and assignment semantics.
-  - [ ] `npysort/*.c.src`, `multiarray/item_selection.c`
-        (`searchsorted`, `take`/`put`/`choose`/`repeat`)
-  - [ ] `multiarray/multiarraymodule.c` (`concatenate`, split/stack APIs)
+  - [x] **Memory-safety fix found while probing:** in-place `a.shape = ...`,
+        `a.strides = ...`, `a.dtype = ...` and `a.resize(...)` left the mask
+        with the old shape/dtype (mask shape != array shape — the invariant
+        every propagation path relies on). They now raise `ValueError` for an
+        array that has a mask *or is serving as another array's mask*
+        (`PyArray_FailIfMaskedInPlace`: shape/strides/dtype setters in
+        `getset.c`, `PyArray_Resize_int` in `shape.c`). These setters are
+        deprecated upstream (2.4/2.5); unmasked arrays are untouched.
+  - [x] **Phase 3 follow-up:** `np.add(x, 1, out=o)` with unmasked inputs
+        left `o`'s stale mask in place although `o` was fully overwritten.
+        `_propagate_ufunc_result_mask` now treats "no masked input but a
+        masked `out`" as an all-False result mask (so it clears, and merges
+        with `where=`).
+  - [x] Gather (`item_selection.c`): `PyArray_TakeFrom` (`take`, `compress`,
+        `extract`, `take_along_axis`), `PyArray_Repeat` (`repeat`, `tile`),
+        `PyArray_Choose` — the identical operation runs on the masks (same
+        indices/axis/mode). `out=` gets the new mask; a stale mask on `out`
+        is dropped when nothing masked was gathered. `np.choose`: result mask
+        = mask of the chosen element OR the selector's own mask.
+  - [x] `np.where(cond, x, y)` (`multiarraymodule.c`): mask = `where(cond,
+        x.mask, y.mask)` OR the condition's own mask (a hidden condition hides
+        the result); operands' shapes are broadcast like the data. Also gives
+        `tril`/`triu`/`select`/`diag`-style helpers for free.
+        `PyArray_WhereNoMask` is the mask-free core, used internally to merge
+        masks (which cannot carry masks).
+  - [x] Combine: `PyArray_ConcatenateInto` concatenates the masks (all-False
+        for unmasked inputs) with the same axis; covers `axis=None`, `dtype=`,
+        `out=` and, through them, `stack`/`vstack`/`hstack`/`dstack`/
+        `column_stack`/`block`/`append`. `split`/`array_split`/`hsplit` are
+        views, already correct from phases 2 and 5.
+  - [x] Scatter — assigned elements take the masked-ness of the values (same
+        convention as phase 6 indexing), by running the identical operation on
+        the mask: `put` (`PyArray_PutTo`), `putmask` (`PyArray_PutMask`),
+        `place` (`compiled_base.c`), `copyto` incl. `where=`
+        (`multiarraymodule.c`), `fill`, `a.flat = v`, `a.real = v` /
+        `a.imag = v`, and `fill_diagonal` via `.flat`. A masked value into an
+        unmasked destination creates the mask. Shared helpers:
+        `PyArray_MaskForUpdate` / `PyArray_FinishMaskUpdate` /
+        `PyArray_FailUnlessMaskWriteable` (read-only masks fail before the
+        data is touched).
+  - [x] Convention: index-returning operations (`argsort`, `argpartition`,
+        `lexsort`, `searchsorted`, `nonzero`/`argwhere`, and phase 4's
+        `argmax`/`argmin`) are mask-blind — indices carry no mask and the
+        mask never changes which index is returned. `npysort/*.c.src`
+        therefore needed no change (`sort` was done in phase 2).
+  - [x] Convention: selection *parameters* — `where=` of a ufunc, `np.putmask`'s
+        and `np.copyto`'s condition, `take`'s indices — are plain data: their
+        own masks are ignored. Data *inputs* that steer the result
+        (`np.where`'s condition, `np.choose`'s selector) propagate their mask.
+  - [x] Tests: `TestMaskGatherScatter` in `test_mask.py`. A 3000-case
+        randomized differential check (each element tagged with a unique id,
+        expected masks derived from the ids) over `take` (all modes/axes),
+        `repeat`, `concatenate`, `stack`, `where`, `choose`, `put` and
+        `copyto(where=)` found 0 mismatches. Leak check (RSS + refcounts of
+        three live masks, 20000 iterations, 34 operations including error
+        paths and `out=`): flat.
 - [ ] **8 — Casting**
   - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
         merged, `HEAD..origin/main` is 0.
@@ -563,7 +628,8 @@ or regression. Every such gap must be listed here so it can be audited later.
 
 | Operation | What happens | Planned |
 |---|---|---|
-| `a.flat = v` (whole flat assignment, `getset.c`) | data assigned, mask left unchanged | phase 7 |
+| `ndarray.setfield` and structured-field writes | data assigned, record mask unchanged (same per-record limitation as below) | out of scope |
+| `out=` (ufunc, take, choose, concatenate) and masked-value assignment through a view whose own mask is `None` | the mask is *replaced* on the `out` object, so other views still holding the old mask object keep it; and a view with no mask (all-False slice) cannot write masked-ness back to its parent's mask | revisit (write into the existing mask buffer instead of replacing it) |
 | structured dtypes (fields) | The mask is **per record** (one bool per array element), not per field; per-field masking (what `numpy.ma` does with a structured mask dtype) is out of scope. Consequences: field views `s["x"]` / `s[["x","y"]]` do **not** carry the record mask (a masked record is visible through the field view); `s["x"] = v` assigns the data and leaves the record mask unchanged. Whole-record operations (`s[i]` fancy/bool/slice, copy, sort, ...) work normally. | out of scope (revisit only if structured masking matters) |
 | assignment to a broadcast view with a read-only mask (`np.broadcast_arrays` results: data warns, mask is read-only) | fails before touching data | revisit |
 | `as_strided`/`sliding_window_view` with a stride that is not a whole number of elements, or a mask layout not proportional to the data | mask dropped | revisit (could conform the mask copy to the data layout) |

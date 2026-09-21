@@ -1041,3 +1041,348 @@ class TestMaskIndexing:
         t = b.T
         assert np.array_equal(t.flat.copy().mask, t.mask.flatten())
         assert np.array_equal(np.asarray(t.flat).mask, t.mask.flatten())
+
+
+class TestMaskGatherScatter:
+    """Phase 7: take/repeat/choose/where/concatenate/put/putmask/place/
+    copyto/fill/flat-assignment, and in-place metadata mutators."""
+
+    def _a(self):
+        a = np.arange(6).reshape(2, 3)
+        a.mask = np.array([[False, True, False], [True, False, False]])
+        return a
+
+    @staticmethod
+    def _d():
+        """Plain (unmasked) copy of the data of `_a()`, for conditions."""
+        return np.arange(6).reshape(2, 3)
+
+    @staticmethod
+    def _full(x, shape=None):
+        shape = x.shape if shape is None else shape
+        return np.zeros(shape, bool) if x.mask is None else np.asarray(x.mask)
+
+    # ----- gather ------------------------------------------------------
+    def test_take_propagates(self):
+        a = self._a()
+        assert np.array_equal(a.take([4, 1, 3]).mask, [False, True, True])
+        assert np.array_equal(a.take([2, 0], axis=1).mask, a.mask.take([2, 0], axis=1))
+        assert np.array_equal(a.take([7, 1], mode="wrap").mask, [True, True])
+        assert np.array_equal(a.take([9, 1], mode="clip").mask, [False, True])
+        assert not np.shares_memory(a.take([1]).mask, a.mask)
+
+    def test_take_out_replaces_mask(self):
+        a = self._a()
+        out = np.empty(3, a.dtype)
+        r = a.take([4, 1, 3], out=out)
+        assert r is out
+        assert np.array_equal(out.mask, [False, True, True])
+        # A stale mask on `out` disappears when nothing masked is taken.
+        out2 = np.zeros(2, a.dtype)
+        out2.mask = np.array([True, True])
+        a.take([0, 2], out=out2)
+        assert out2.mask is None
+
+    def test_take_unmasked_and_scalar(self):
+        assert np.arange(4).take([1, 2]).mask is None
+        assert isinstance(self._a().take(1), np.generic)  # scalar: no mask
+
+    def test_repeat_and_tile(self):
+        a = self._a()
+        assert np.array_equal(a.repeat(2).mask, a.mask.repeat(2))
+        assert np.array_equal(a.repeat([1, 2, 1], axis=1).mask,
+                              a.mask.repeat([1, 2, 1], axis=1))
+        assert np.array_equal(np.tile(a, (2, 2)).mask, np.tile(a.mask, (2, 2)))
+        assert np.arange(3).repeat(2).mask is None
+
+    def test_compress_extract(self):
+        a = self._a()
+        assert np.array_equal(a.compress([True, False, True], axis=1).mask,
+                              a.mask.compress([True, False, True], axis=1))
+        sel = a.ravel() > 0
+        assert np.array_equal(np.extract(sel, a).mask,
+                              a.mask.ravel()[sel])
+
+    def test_choose(self):
+        a = self._a()
+        b = np.arange(6).reshape(2, 3) * 10
+        b.mask = np.array([[True, False, False], [False, False, True]])
+        sel = np.array([[0, 1, 0], [1, 0, 1]])
+        r = np.choose(sel, [a, b])
+        assert np.array_equal(r, np.choose(sel, [np.asarray(a), np.asarray(b)]))
+        expected = np.where(sel == 0, a.mask, b.mask)
+        assert np.array_equal(self._full(r), expected)
+
+    def test_choose_masked_selector_and_unmasked_choices(self):
+        sel = np.array([0, 1, 0, 1])
+        sel.mask = np.array([False, True, False, False])
+        r = np.choose(sel, [np.arange(4), np.arange(4) * 2])
+        assert np.array_equal(r.mask, [False, True, False, False])
+        c = np.arange(4)
+        c.mask = np.array([True, False, False, False])
+        r = np.choose(np.zeros(4, int), [c, 5])  # scalar choice
+        assert np.array_equal(r.mask, [True, False, False, False])
+
+    def test_choose_out_clears_stale_mask(self):
+        out = np.zeros(2, int)
+        out.mask = np.array([True, True])
+        np.choose(np.array([0, 1]), [np.arange(2), np.arange(2)], out=out)
+        assert out.mask is None
+
+    def test_where(self):
+        a = self._a()
+        cond = self._d() > 2
+        r = np.where(cond, a, 0)
+        assert np.array_equal(self._full(r), np.where(cond, a.mask, False))
+        r = np.where(cond, 0, a)
+        assert np.array_equal(self._full(r), np.where(cond, False, a.mask))
+        # broadcast operands: unmasked y wider than masked x
+        x = np.array([1, 2, 3]); x.mask = np.array([False, True, False])
+        r = np.where(np.array([[True], [False]]), x, np.zeros((2, 3), int))
+        assert r.shape == (2, 3)
+        assert np.array_equal(r.mask, [[False, True, False], [False] * 3] )
+
+    def test_where_masked_condition_hides_result(self):
+        cond = np.array([True, False, True])
+        cond.mask = np.array([False, True, False])
+        r = np.where(cond, 1, 2)
+        assert np.array_equal(r.mask, [False, True, False])
+
+    def test_where_one_argument_and_unmasked(self):
+        a = self._a()
+        assert all(i.mask is None for i in np.where(a > 1))
+        assert np.where(np.arange(3) > 1, 1, 2).mask is None
+
+    def test_where_derived_helpers(self):
+        a = self._a()
+        assert np.array_equal(self._full(np.tril(a)),
+                              np.where(np.tri(2, 3, dtype=bool), a.mask, False))
+        r = np.select([self._d() > 3, self._d() <= 3], [a, -a])
+        assert np.array_equal(self._full(r), a.mask)
+
+    def test_index_returning_ops_are_mask_blind(self):
+        a = self._a()
+        assert np.argsort(a).mask is None
+        assert np.arange(10).searchsorted(a).mask is None
+        assert np.argwhere(a).mask is None
+        assert all(i.mask is None for i in a.nonzero())
+
+    # ----- combine -----------------------------------------------------
+    def test_concatenate_axes(self):
+        a = self._a()
+        for axis in (0, 1, -1):
+            r = np.concatenate([a, a], axis=axis)
+            assert np.array_equal(r.mask,
+                                  np.concatenate([a.mask, a.mask], axis=axis))
+        r = np.concatenate([a, a], axis=None)
+        assert np.array_equal(r.mask, np.concatenate([a.mask.ravel()] * 2))
+
+    def test_concatenate_mixed_masked_unmasked(self):
+        a = self._a()
+        r = np.concatenate([np.zeros((1, 3), int), a])
+        assert np.array_equal(r.mask, np.vstack([np.zeros((1, 3), bool), a.mask]))
+        assert np.array_equal(np.concatenate([a, [[1, 2, 3]]]).mask,
+                              np.vstack([a.mask, np.zeros((1, 3), bool)]))
+        assert np.concatenate([np.arange(3), np.arange(3)]).mask is None
+
+    def test_concatenate_dtype_and_out(self):
+        a = self._a()
+        r = np.concatenate([a, a], dtype=float)
+        assert r.dtype == float
+        assert np.array_equal(r.mask, np.vstack([a.mask, a.mask]))
+        out = np.empty((4, 3), a.dtype)
+        r = np.concatenate([a, a], out=out)
+        assert r is out
+        assert np.array_equal(out.mask, np.vstack([a.mask, a.mask]))
+        stale = np.zeros((4, 3), a.dtype)
+        stale.mask = np.ones((4, 3), bool)
+        np.concatenate([np.zeros((2, 3), int)] * 2, out=stale)
+        assert stale.mask is None
+
+    def test_stacking_helpers(self):
+        a = self._a()
+        m = a.mask
+        assert np.array_equal(np.stack([a, a]).mask, np.stack([m, m]))
+        assert np.array_equal(np.vstack([a, a]).mask, np.vstack([m, m]))
+        assert np.array_equal(np.hstack([a, a]).mask, np.hstack([m, m]))
+        assert np.array_equal(np.dstack([a, a]).mask, np.dstack([m, m]))
+        assert np.array_equal(np.column_stack([a, a]).mask, np.column_stack([m, m]))
+        assert np.array_equal(np.block([[a, a], [a, a]]).mask,
+                              np.block([[m, m], [m, m]]))
+        assert np.array_equal(np.append(a, a, axis=0).mask, np.vstack([m, m]))
+
+    def test_split_helpers(self):
+        a = self._a()
+        parts = np.split(a, 3, axis=1)
+        for i, p in enumerate(parts):
+            assert np.array_equal(self._full(p), a.mask[:, i:i + 1])
+        assert np.array_equal(self._full(np.array_split(a, 2, axis=1)[0]),
+                              a.mask[:, :2])
+
+    # ----- scatter -----------------------------------------------------
+    def test_put_takes_masked_ness_of_values(self):
+        a = self._a()
+        a.put([1, 4], [50, 60])
+        assert np.array_equal(a.mask, [[False, False, False], [True, False, False]])
+        b = np.arange(6)
+        vals = np.array([7, 8]); vals.mask = np.array([True, False])
+        b.put([2, 4], vals)
+        assert np.array_equal(b.mask, [False, False, True, False, False, False])
+        c = self._a()
+        c.put([7], [9], mode="wrap")  # -> flat index 1
+        assert not c.mask[0, 1]
+        np.put(c, [0], [1])
+        assert not c.mask[0, 0]
+
+    def test_put_error_leaves_mask_alone(self):
+        a = self._a()
+        before = a.mask.copy()
+        with pytest.raises(IndexError):
+            a.put([99], [1])
+        assert np.array_equal(a.mask, before)
+
+    def test_putmask(self):
+        a = self._a()
+        np.putmask(a, self._d() >= 1, 0)
+        assert not np.asarray(a.mask).any()
+        b = np.arange(5)
+        vals = np.array([10, 20]); vals.mask = np.array([False, True])
+        np.putmask(b, np.array([True, False, True, True, False]), vals)
+        # putmask cycles by absolute position: index n takes vals[n % 2]
+        assert np.array_equal(b, [10, 1, 10, 20, 4])
+        assert np.array_equal(b.mask, [False, False, False, True, False])
+
+    def test_place(self):
+        a = self._a()
+        np.place(a, self._d() >= 1, [7, 8])
+        assert not np.asarray(a.mask).any()
+        b = np.arange(5)
+        vals = np.array([10, 20]); vals.mask = np.array([True, False])
+        np.place(b, np.array([False, True, True, True, False]), vals)
+        assert np.array_equal(b, [0, 10, 20, 10, 4])
+        assert np.array_equal(b.mask, [False, True, False, True, False])
+
+    def test_copyto(self):
+        a = self._a()
+        np.copyto(a, 9, where=self._d() < 2)
+        assert np.array_equal(a.mask, [[False, False, False], [True, False, False]])
+        b = np.arange(4)
+        src = np.array([5, 6, 7, 8]); src.mask = np.array([False, True, True, False])
+        np.copyto(b, src, where=np.array([True, True, False, True]))
+        assert np.array_equal(b, [5, 6, 2, 8])
+        assert np.array_equal(b.mask, [False, True, False, False])
+        c = self._a()
+        np.copyto(c, np.zeros((2, 3), int))
+        assert not np.asarray(c.mask).any()
+        d = np.zeros(3)
+        np.copyto(d, np.array([1.0, 2.0, 3.0]))
+        assert d.mask is None
+
+    def test_copyto_broadcast_masked_src(self):
+        d = np.zeros((2, 3), int)
+        src = np.array([1, 2, 3]); src.mask = np.array([False, True, False])
+        np.copyto(d, src)
+        assert np.array_equal(d.mask, [[False, True, False]] * 2)
+
+    def test_fill(self):
+        a = self._a()
+        a.fill(5)
+        assert not np.asarray(a.mask).any()
+        b = np.arange(4)
+        b.fill(0)
+        assert b.mask is None
+        z = np.array(1.0); z.mask = np.array(True)
+        c = np.arange(3)
+        c.fill(z)
+        assert np.array_equal(c.mask, [True, True, True])
+
+    def test_flat_whole_assignment(self):
+        a = self._a()
+        a.flat = 7
+        assert not np.asarray(a.mask).any()
+        b = np.arange(6).reshape(2, 3)
+        vals = np.array([1, 2]); vals.mask = np.array([True, False])
+        b.flat = vals  # cycles: [1, 2, 1, 2, 1, 2]
+        assert np.array_equal(b.mask, [[True, False, True], [False, True, False]])
+        c = self._a()
+        np.fill_diagonal(c, 0)
+        assert not c.mask[0, 0] and c.mask[0, 1]
+
+    def test_real_imag_assignment(self):
+        a = self._a().astype(complex)
+        a.real = 1
+        assert not np.asarray(a.mask).any()
+        b = self._a().astype(float)
+        b.real = 3
+        assert not np.asarray(b.mask).any()
+
+    def test_read_only_mask_blocks_scatter_before_data(self):
+        for op in (lambda a: a.put([0], [9]),
+                   lambda a: np.putmask(a, np.ones(a.shape, bool), 9),
+                   lambda a: np.copyto(a, 9),
+                   lambda a: a.fill(9),
+                   lambda a: setattr(a, "flat", 9)):
+            a = self._a()
+            a.mask.flags.writeable = False
+            with pytest.raises(ValueError, match="read-only"):
+                op(a)
+            assert np.array_equal(a, np.arange(6).reshape(2, 3))
+
+    def test_assigning_into_a_mask_is_plain(self):
+        a = self._a()
+        m = a.mask
+        m.fill(True)
+        assert m.all() and m.mask is None
+
+    # ----- ufunc out= (phase 3 follow-up) ------------------------------
+    def test_ufunc_out_clears_stale_mask_for_unmasked_inputs(self):
+        out = np.zeros(4)
+        out.mask = np.array([True, False, True, False])
+        np.add(np.arange(4.0), 1.0, out=out)
+        assert out.mask is None
+
+    def test_ufunc_out_where_clears_only_written_positions(self):
+        out = np.zeros(4)
+        out.mask = np.array([True, True, True, True])
+        np.add(np.arange(4.0), 1.0, out=out,
+               where=np.array([True, False, True, False]))
+        assert np.array_equal(out.mask, [False, True, False, True])
+
+    # ----- in-place metadata mutators cannot keep a mask consistent -----
+    def test_inplace_shape_strides_dtype_resize_rejected(self):
+        a = self._a()
+        with pytest.warns(DeprecationWarning), \
+                pytest.raises(ValueError, match="in place"):
+            a.shape = (3, 2)
+        with pytest.warns(DeprecationWarning), \
+                pytest.raises(ValueError, match="in place"):
+            a.dtype = np.int32
+        with pytest.warns(DeprecationWarning), \
+                pytest.raises(ValueError, match="in place"):
+            a.strides = (24, 8)
+        assert a.shape == (2, 3) and a.mask.shape == (2, 3)
+        b = np.arange(6)
+        b.mask = np.array([False, True, False, False, False, False])
+        with pytest.raises(ValueError, match="in place"):
+            b.resize(8, refcheck=False)
+        assert b.shape == (6,)
+
+    def test_inplace_mutators_rejected_on_an_array_serving_as_mask(self):
+        a = self._a()
+        m = a.mask
+        with pytest.warns(DeprecationWarning), \
+                pytest.raises(ValueError, match="in place"):
+            m.shape = (6,)
+        with pytest.warns(DeprecationWarning), \
+                pytest.raises(ValueError, match="in place"):
+            m.dtype = np.uint8
+        assert a.mask.shape == a.shape
+
+    def test_inplace_mutators_unchanged_for_unmasked(self):
+        b = np.arange(6)
+        with pytest.warns(DeprecationWarning):
+            b.shape = (2, 3)
+        assert b.shape == (2, 3)
+        b = np.arange(6)
+        b.resize(8, refcheck=False)
+        assert b.shape == (8,)

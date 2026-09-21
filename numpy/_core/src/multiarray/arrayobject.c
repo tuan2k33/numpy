@@ -380,6 +380,80 @@ PyArray_CopyMaskFrom(PyArrayObject *dst, PyArrayObject *src)
 
 
 NPY_NO_EXPORT int
+PyArray_MaskForUpdate(PyArrayObject *dst, int rhs_masked,
+                      PyArrayObject **mask, int *created)
+{
+    *mask = NULL;
+    *created = 0;
+    if (PyArray_CHKFLAGS(dst, NPY_ARRAY_IS_MASK)) {
+        return 0;
+    }
+    PyArrayObject *m = (PyArrayObject *)PyArray_MASK(dst);
+    if (m == NULL) {
+        if (!rhs_masked) {
+            return 0;
+        }
+        m = (PyArrayObject *)PyArray_ZEROS(
+                PyArray_NDIM(dst), PyArray_DIMS(dst), NPY_BOOL, 0);
+        if (m == NULL) {
+            return -1;
+        }
+        *created = 1;
+    }
+    else {
+        Py_INCREF(m);
+    }
+    *mask = m;
+    return 1;
+}
+
+
+NPY_NO_EXPORT int
+PyArray_FinishMaskUpdate(PyArrayObject *dst, PyArrayObject *mask,
+                         int created, int failed)
+{
+    if (failed) {
+        Py_DECREF(mask);
+        return -1;
+    }
+    if (created) {
+        /* Steals the reference. */
+        return PyArray_SetMaskObject(dst, (PyObject *)mask);
+    }
+    Py_DECREF(mask);
+    return 0;
+}
+
+
+NPY_NO_EXPORT int
+PyArray_FailUnlessMaskWriteable(PyArrayObject *dst)
+{
+    if (PyArray_MASK(dst) != NULL) {
+        return PyArray_FailUnlessWriteable(
+                (PyArrayObject *)PyArray_MASK(dst),
+                "assignment destination's mask");
+    }
+    return 0;
+}
+
+
+NPY_NO_EXPORT int
+PyArray_FailIfMaskedInPlace(PyArrayObject *self, const char *what)
+{
+    if (PyArray_MASK(self) != NULL ||
+            PyArray_CHKFLAGS(self, NPY_ARRAY_IS_MASK)) {
+        PyErr_Format(PyExc_ValueError,
+                "cannot %s in place on a masked array (or an array in use "
+                "as a mask): the mask could no longer describe it. Create "
+                "a new array instead (reshape(), view(), astype(), "
+                "np.resize()).", what);
+        return -1;
+    }
+    return 0;
+}
+
+
+NPY_NO_EXPORT int
 PyArray_ViewMaskFrom(PyArrayObject *dst, PyArrayObject *src)
 {
     if (PyArray_MASK(src) == NULL) {

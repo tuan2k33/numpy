@@ -228,12 +228,9 @@ npy_fasttake(
 }
 
 
-/*NUMPY_API
- * Take
- */
-NPY_NO_EXPORT PyObject *
-PyArray_TakeFrom(PyArrayObject *self0, PyObject *indices0, int axis,
-                 PyArrayObject *out, NPY_CLIPMODE clipmode)
+static PyObject *
+PyArray_TakeFrom_data(PyArrayObject *self0, PyObject *indices0, int axis,
+                      PyArrayObject *out, NPY_CLIPMODE clipmode)
 {
     PyArray_Descr *dtype, *out_dtype;
     PyArrayObject *obj = NULL, *self, *indices;
@@ -378,12 +375,55 @@ PyArray_TakeFrom(PyArrayObject *self0, PyObject *indices0, int axis,
     return NULL;
 }
 
+/*
+ * `out` given but neither input masked: `out` is fully overwritten with
+ * unmasked data, so any mask it carried is stale.
+ */
+static int
+_clear_stale_out_mask(PyArrayObject *out)
+{
+    if (out != NULL && PyArray_MASK(out) != NULL) {
+        return PyArray_SetMaskObject(out, NULL);
+    }
+    return 0;
+}
+
+
 /*NUMPY_API
- * Put values into an array
+ * Take
+ *
+ * Masks are gathered with the identical indices, axis and mode.
  */
 NPY_NO_EXPORT PyObject *
-PyArray_PutTo(PyArrayObject *self, PyObject* values0, PyObject *indices0,
-              NPY_CLIPMODE clipmode)
+PyArray_TakeFrom(PyArrayObject *self0, PyObject *indices0, int axis,
+                 PyArrayObject *out, NPY_CLIPMODE clipmode)
+{
+    PyObject *res = PyArray_TakeFrom_data(self0, indices0, axis, out, clipmode);
+    if (res == NULL || !PyArray_Check(res)) {
+        return res;  /* a scalar cannot carry a mask */
+    }
+    if (PyArray_MASK(self0) == NULL) {
+        if (_clear_stale_out_mask(out) < 0) {
+            Py_DECREF(res);
+            return NULL;
+        }
+        return res;
+    }
+    PyObject *mask_res = PyArray_TakeFrom_data(
+            (PyArrayObject *)PyArray_MASK(self0), indices0, axis, NULL,
+            clipmode);
+    if (mask_res == NULL ||
+            PyArray_SetMaskObject((PyArrayObject *)res, mask_res) < 0) {
+        Py_DECREF(res);
+        return NULL;
+    }
+    return res;
+}
+
+
+static PyObject *
+PyArray_PutTo_data(PyArrayObject *self, PyObject* values0, PyObject *indices0,
+                   NPY_CLIPMODE clipmode)
 {
     PyArrayObject  *indices, *values;
     npy_intp i, itemsize, ni, max_item, nv, tmp;
@@ -670,10 +710,49 @@ npy_fastputmask(
 
 
 /*NUMPY_API
- * Put values into an array according to a mask.
+ * Put values into an array
+ *
+ * The assigned elements take the masked-ness of `values` (False if it is not
+ * masked): the identical put runs on the mask.
  */
 NPY_NO_EXPORT PyObject *
-PyArray_PutMask(PyArrayObject *self, PyObject* values0, PyObject* mask0)
+PyArray_PutTo(PyArrayObject *self, PyObject* values0, PyObject *indices0,
+              NPY_CLIPMODE clipmode)
+{
+    if (PyArray_Check(self) && PyArray_FailUnlessMaskWriteable(self) < 0) {
+        return NULL;
+    }
+    PyObject *values_mask = NULL;
+    if (PyArray_Check(values0)) {
+        values_mask = PyArray_MASK((PyArrayObject *)values0);
+    }
+    PyObject *res = PyArray_PutTo_data(self, values0, indices0, clipmode);
+    if (res == NULL || !PyArray_Check(self)) {
+        return res;
+    }
+    PyArrayObject *mask;
+    int created;
+    int rc = PyArray_MaskForUpdate(self, values_mask != NULL, &mask, &created);
+    if (rc < 0) {
+        Py_DECREF(res);
+        return NULL;
+    }
+    if (rc == 1) {
+        PyObject *r = PyArray_PutTo_data(
+                mask, values_mask != NULL ? values_mask : Py_False,
+                indices0, clipmode);
+        Py_XDECREF(r);
+        if (PyArray_FinishMaskUpdate(self, mask, created, r == NULL) < 0) {
+            Py_DECREF(res);
+            return NULL;
+        }
+    }
+    return res;
+}
+
+
+static PyObject *
+PyArray_PutMask_data(PyArrayObject *self, PyObject* values0, PyObject* mask0)
 {
     PyArrayObject *mask, *values;
     PyArray_Descr *dtype;
@@ -890,10 +969,46 @@ npy_fastrepeat(
 
 
 /*NUMPY_API
- * Repeat the array.
+ * Put values into an array according to a mask.
+ *
+ * As for `PyArray_PutTo`, the identical putmask runs on the array's mask.
  */
 NPY_NO_EXPORT PyObject *
-PyArray_Repeat(PyArrayObject *aop, PyObject *op, int axis)
+PyArray_PutMask(PyArrayObject *self, PyObject* values0, PyObject* mask0)
+{
+    if (PyArray_Check(self) && PyArray_FailUnlessMaskWriteable(self) < 0) {
+        return NULL;
+    }
+    PyObject *values_mask = NULL;
+    if (PyArray_Check(values0)) {
+        values_mask = PyArray_MASK((PyArrayObject *)values0);
+    }
+    PyObject *res = PyArray_PutMask_data(self, values0, mask0);
+    if (res == NULL || !PyArray_Check(self)) {
+        return res;
+    }
+    PyArrayObject *mask;
+    int created;
+    int rc = PyArray_MaskForUpdate(self, values_mask != NULL, &mask, &created);
+    if (rc < 0) {
+        Py_DECREF(res);
+        return NULL;
+    }
+    if (rc == 1) {
+        PyObject *r = PyArray_PutMask_data(
+                mask, values_mask != NULL ? values_mask : Py_False, mask0);
+        Py_XDECREF(r);
+        if (PyArray_FinishMaskUpdate(self, mask, created, r == NULL) < 0) {
+            Py_DECREF(res);
+            return NULL;
+        }
+    }
+    return res;
+}
+
+
+static PyObject *
+PyArray_Repeat_data(PyArrayObject *aop, PyObject *op, int axis)
 {
     npy_intp *counts;
     npy_intp i, j, n, n_outer, chunk, elsize, nel;
@@ -1015,10 +1130,31 @@ PyArray_Repeat(PyArrayObject *aop, PyObject *op, int axis)
 
 
 /*NUMPY_API
+ * Repeat the array.
+ *
+ * The mask is repeated with the identical counts and axis.
  */
 NPY_NO_EXPORT PyObject *
-PyArray_Choose(PyArrayObject *ip, PyObject *op, PyArrayObject *out,
-               NPY_CLIPMODE clipmode)
+PyArray_Repeat(PyArrayObject *aop, PyObject *op, int axis)
+{
+    PyObject *mask = PyArray_MASK(aop);  /* borrowed; `aop` stays alive */
+    PyObject *res = PyArray_Repeat_data(aop, op, axis);
+    if (res == NULL || mask == NULL || !PyArray_Check(res)) {
+        return res;
+    }
+    PyObject *mask_res = PyArray_Repeat_data((PyArrayObject *)mask, op, axis);
+    if (mask_res == NULL ||
+            PyArray_SetMaskObject((PyArrayObject *)res, mask_res) < 0) {
+        Py_DECREF(res);
+        return NULL;
+    }
+    return res;
+}
+
+
+static PyObject *
+PyArray_Choose_data(PyArrayObject *ip, PyObject *op, PyArrayObject *out,
+                    NPY_CLIPMODE clipmode)
 {
     PyArrayObject *obj = NULL;
     PyArray_Descr *dtype;
@@ -1721,6 +1857,103 @@ partition_prep_kth_array(PyArrayObject * ktharray,
     }
 
     return kthrvl;
+}
+
+
+/*
+ * List with one bool array per choice: the choice's own mask, or an all-False
+ * array of the same shape if it has none. Sets `*any_masked` if any choice
+ * carries a mask.
+ */
+static PyObject *
+_choice_masks(PyObject *op, int *any_masked)
+{
+    PyObject *seq = PySequence_Fast(op, "choices must be a sequence");
+    if (seq == NULL) {
+        return NULL;
+    }
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    PyObject *list = PyList_New(n);
+    if (list == NULL) {
+        Py_DECREF(seq);
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(seq, i);
+        PyObject *m = NULL;
+        if (PyArray_Check(item) && PyArray_MASK((PyArrayObject *)item) != NULL) {
+            m = PyArray_MASK((PyArrayObject *)item);
+            Py_INCREF(m);
+            *any_masked = 1;
+        }
+        else {
+            PyArrayObject *arr = (PyArrayObject *)PyArray_FROM_O(item);
+            if (arr == NULL) {
+                Py_DECREF(list);
+                Py_DECREF(seq);
+                return NULL;
+            }
+            m = PyArray_ZEROS(
+                    PyArray_NDIM(arr), PyArray_DIMS(arr), NPY_BOOL, 0);
+            Py_DECREF(arr);
+            if (m == NULL) {
+                Py_DECREF(list);
+                Py_DECREF(seq);
+                return NULL;
+            }
+        }
+        PyList_SET_ITEM(list, i, m);
+    }
+    Py_DECREF(seq);
+    return list;
+}
+
+
+/*NUMPY_API
+ *
+ * The result's mask is the mask of the chosen element, OR-ed with the
+ * selector's own mask (a hidden selector hides the result): the identical
+ * choose runs on the masks.
+ */
+NPY_NO_EXPORT PyObject *
+PyArray_Choose(PyArrayObject *ip, PyObject *op, PyArrayObject *out,
+               NPY_CLIPMODE clipmode)
+{
+    PyObject *res = PyArray_Choose_data(ip, op, out, clipmode);
+    if (res == NULL || !PyArray_Check(res)) {
+        return res;
+    }
+    int any_masked = 0;
+    PyObject *sel_mask = PyArray_MASK(ip);
+    if (sel_mask != NULL) {
+        any_masked = 1;
+    }
+    PyObject *masks = _choice_masks(op, &any_masked);
+    if (masks == NULL) {
+        Py_DECREF(res);
+        return NULL;
+    }
+    if (!any_masked) {
+        Py_DECREF(masks);
+        if (_clear_stale_out_mask(out) < 0) {
+            Py_DECREF(res);
+            return NULL;
+        }
+        return res;
+    }
+    PyObject *mask_res = PyArray_Choose_data(ip, masks, NULL, clipmode);
+    Py_DECREF(masks);
+    if (mask_res != NULL && sel_mask != NULL) {
+        PyObject *merged = PyNumber_Or(mask_res, sel_mask);
+        Py_DECREF(mask_res);
+        mask_res = merged;
+    }
+    if (mask_res == NULL ||
+            PyArray_SetMaskObject((PyArrayObject *)res, mask_res) < 0) {
+        Py_DECREF(res);
+        return NULL;
+    }
+    return res;
 }
 
 

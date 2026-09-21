@@ -658,6 +658,60 @@ PyArray_ConcatenateFlattenedArrays(int narrays, PyArrayObject **arrays,
 }
 
 
+NPY_NO_EXPORT PyObject *
+PyArray_ConcatenateInto(PyObject *op,
+        int axis, PyArrayObject *ret, PyArray_Descr *dtype,
+        NPY_CASTING casting);
+
+/*
+ * Concatenate the masks of `arrays` (an all-False array for an unmasked one)
+ * with the same axis and attach the result to `ret`. If nothing is masked,
+ * an `out=` array that carried a mask is fully overwritten by unmasked data,
+ * so its stale mask is dropped.
+ */
+static int
+_concatenate_mask(int narrays, PyArrayObject **arrays, int axis,
+                  PyArrayObject *ret)
+{
+    int any_masked = 0;
+    for (int i = 0; i < narrays; i++) {
+        if (PyArray_MASK(arrays[i]) != NULL) {
+            any_masked = 1;
+            break;
+        }
+    }
+    if (!any_masked) {
+        return PyArray_MASK(ret) != NULL ? PyArray_SetMaskObject(ret, NULL) : 0;
+    }
+    PyObject *masks = PyTuple_New(narrays);
+    if (masks == NULL) {
+        return -1;
+    }
+    for (int i = 0; i < narrays; i++) {
+        PyObject *m = PyArray_MASK(arrays[i]);
+        if (m != NULL) {
+            Py_INCREF(m);
+        }
+        else {
+            m = PyArray_ZEROS(PyArray_NDIM(arrays[i]),
+                              PyArray_DIMS(arrays[i]), NPY_BOOL, 0);
+            if (m == NULL) {
+                Py_DECREF(masks);
+                return -1;
+            }
+        }
+        PyTuple_SET_ITEM(masks, i, m);
+    }
+    PyObject *mask_ret = PyArray_ConcatenateInto(
+            masks, axis, NULL, NULL, NPY_SAME_KIND_CASTING);
+    Py_DECREF(masks);
+    if (mask_ret == NULL) {
+        return -1;
+    }
+    return PyArray_SetMaskObject(ret, mask_ret);
+}
+
+
 /**
  * Implementation for np.concatenate
  *
@@ -729,6 +783,10 @@ PyArray_ConcatenateInto(PyObject *op,
     else {
         ret = PyArray_ConcatenateArrays(
                 narrays, arrays, axis, ret, dtype, casting);
+    }
+
+    if (ret != NULL && _concatenate_mask(narrays, arrays, axis, ret) < 0) {
+        Py_CLEAR(ret);
     }
 
     for (iarrays = 0; iarrays < narrays; ++iarrays) {
@@ -2032,8 +2090,45 @@ array_copyto(PyObject *NPY_UNUSED(ignored),
         }
     }
 
+    if (PyArray_FailUnlessMaskWriteable(dst) < 0) {
+        goto fail;
+    }
     if (PyArray_AssignArray(dst, src, wheremask, casting) < 0) {
         goto fail;
+    }
+
+    /*
+     * The copied elements take the masked-ness of `src` (False if unmasked),
+     * honouring `where`: the identical copy runs on the mask.
+     */
+    {
+        PyArrayObject *dst_mask;
+        int created;
+        int rc = PyArray_MaskForUpdate(
+                dst, PyArray_MASK(src) != NULL, &dst_mask, &created);
+        if (rc < 0) {
+            goto fail;
+        }
+        if (rc == 1) {
+            PyArrayObject *src_mask = (PyArrayObject *)PyArray_MASK(src);
+            if (src_mask != NULL) {
+                Py_INCREF(src_mask);
+            }
+            else {
+                src_mask = (PyArrayObject *)PyArray_ZEROS(
+                        0, NULL, NPY_BOOL, 0);
+                if (src_mask == NULL) {
+                    PyArray_FinishMaskUpdate(dst, dst_mask, created, 1);
+                    goto fail;
+                }
+            }
+            int res = PyArray_AssignArray(
+                    dst_mask, src_mask, wheremask, NPY_UNSAFE_CASTING);
+            Py_DECREF(src_mask);
+            if (PyArray_FinishMaskUpdate(dst, dst_mask, created, res < 0) < 0) {
+                goto fail;
+            }
+        }
     }
 
     Py_XDECREF(src);
@@ -3243,11 +3338,8 @@ array_set_datetimeparse_function(PyObject *NPY_UNUSED(self),
     } while(0)
 
 
-/*NUMPY_API
- * Where
- */
 NPY_NO_EXPORT PyObject *
-PyArray_Where(PyObject *condition, PyObject *x, PyObject *y)
+PyArray_WhereNoMask(PyObject *condition, PyObject *x, PyObject *y)
 {
     PyArrayObject *arr = NULL, *ax = NULL, *ay = NULL;
     PyObject *ret = NULL;
@@ -3476,6 +3568,74 @@ fail:
         NpyIter_Deallocate(iter);
     }
     return NULL;
+}
+
+
+/* The mask of `x` (or an all-False array of its shape if it has none). */
+static PyObject *
+_where_operand_mask(PyObject *x)
+{
+    PyArrayObject *ax = (PyArrayObject *)PyArray_FROM_O(x);
+    if (ax == NULL) {
+        return NULL;
+    }
+    PyObject *m = PyArray_MASK(ax);
+    if (m != NULL) {
+        Py_INCREF(m);
+    }
+    else {
+        m = PyArray_ZEROS(PyArray_NDIM(ax), PyArray_DIMS(ax), NPY_BOOL, 0);
+    }
+    Py_DECREF(ax);
+    return m;
+}
+
+
+/*NUMPY_API
+ * Where
+ *
+ * The result's mask is `where(condition, x.mask, y.mask)`, OR-ed with the
+ * condition's own mask (a hidden condition hides the result). The
+ * one-argument form returns indices and carries no mask.
+ */
+NPY_NO_EXPORT PyObject *
+PyArray_Where(PyObject *condition, PyObject *x, PyObject *y)
+{
+    PyObject *ret = PyArray_WhereNoMask(condition, x, y);
+    if (ret == NULL || x == NULL || y == NULL || !PyArray_Check(ret)) {
+        return ret;
+    }
+    PyObject *cond_mask = NULL;
+    if (PyArray_Check(condition)) {
+        cond_mask = PyArray_MASK((PyArrayObject *)condition);
+    }
+    npy_bool x_masked = PyArray_Check(x) &&
+            PyArray_MASK((PyArrayObject *)x) != NULL;
+    npy_bool y_masked = PyArray_Check(y) &&
+            PyArray_MASK((PyArrayObject *)y) != NULL;
+    if (cond_mask == NULL && !x_masked && !y_masked) {
+        return ret;
+    }
+
+    PyObject *mask_x = _where_operand_mask(x);
+    PyObject *mask_y = mask_x != NULL ? _where_operand_mask(y) : NULL;
+    PyObject *mask = NULL;
+    if (mask_y != NULL) {
+        mask = PyArray_WhereNoMask(condition, mask_x, mask_y);
+    }
+    Py_XDECREF(mask_x);
+    Py_XDECREF(mask_y);
+    if (mask != NULL && cond_mask != NULL) {
+        PyObject *merged = PyNumber_Or(mask, cond_mask);
+        Py_DECREF(mask);
+        mask = merged;
+    }
+    if (mask == NULL ||
+            PyArray_SetMaskObject((PyArrayObject *)ret, mask) < 0) {
+        Py_DECREF(ret);
+        return NULL;
+    }
+    return ret;
 }
 
 #undef INNER_WHERE_LOOP

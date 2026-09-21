@@ -32,6 +32,11 @@ typedef struct npy_global_state_struct {
 NPY_NO_EXPORT int
 get_legacy_print_mode(void);
 
+/* `np.where` without the mask propagation (used to combine masks, which
+ * themselves cannot carry a mask). */
+NPY_NO_EXPORT PyObject *
+PyArray_WhereNoMask(PyObject *condition, PyObject *x, PyObject *y);
+
 #ifdef __cplusplus
 }
 #endif

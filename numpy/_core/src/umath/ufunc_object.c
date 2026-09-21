@@ -5396,8 +5396,33 @@ _propagate_ufunc_result_mask(PyUFuncObject *ufunc,
         }
     }
     if (combined_mask == NULL) {
-        /* No masked input: nothing to propagate, nothing to touch. */
-        return 0;
+        /*
+         * No masked input: normally nothing to propagate. But an `out=`
+         * that carries a mask is overwritten with unmasked results, so its
+         * old mask must go (where written): continue with an all-False
+         * combined mask, which replaces/merges like any other.
+         */
+        npy_bool out_has_mask = NPY_FALSE;
+        if (nout == 1) {
+            out_has_mask = PyArray_Check(result) &&
+                    PyArray_MASK((PyArrayObject *)result) != NULL;
+        }
+        else if (PyTuple_Check(result)) {
+            for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(result); i++) {
+                PyObject *item = PyTuple_GET_ITEM(result, i);
+                if (PyArray_Check(item) &&
+                        PyArray_MASK((PyArrayObject *)item) != NULL) {
+                    out_has_mask = NPY_TRUE;
+                }
+            }
+        }
+        if (!out_has_mask) {
+            return 0;
+        }
+        combined_mask = PyArray_ZEROS(0, NULL, NPY_BOOL, 0);
+        if (combined_mask == NULL) {
+            return -1;
+        }
     }
 
     /* One or many outputs (e.g. `divmod`) -- apply the same combined,
@@ -5479,7 +5504,8 @@ _propagate_ufunc_result_mask(PyUFuncObject *ufunc,
             /* new_data_mask where `where` is true, old mask otherwise --
              * mirrors exactly how the wrapped call already treated the
              * data itself. */
-            PyObject *merged = PyArray_Where(where_obj, full_mask, old_mask_full);
+            PyObject *merged = PyArray_WhereNoMask(
+                    where_obj, full_mask, old_mask_full);
             Py_DECREF(full_mask);
             Py_DECREF(old_mask_full);
             if (merged == NULL) {

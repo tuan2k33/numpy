@@ -48,6 +48,39 @@ NPY_NO_EXPORT int
 PyArray_ViewMaskFrom(PyArrayObject *dst, PyArrayObject *src);
 
 /*
+ * Helpers for in-place writes (put, putmask, place, copyto, fill, flat=) into
+ * `dst`: the assigned elements take the masked-ness of the right-hand side.
+ *
+ * `PyArray_MaskForUpdate` returns 0 when there is nothing to do (`dst` is
+ * itself a mask, or neither `dst` nor the right-hand side is masked), 1 with
+ * `*mask` set to a new reference to the mask to update in place (an all-False
+ * mask is created when `dst` has none and `rhs_masked` is set; `*created` is
+ * then 1), or -1 with an exception set. `PyArray_FinishMaskUpdate` releases
+ * `mask` and, if it was newly created and `failed` is 0, attaches it to
+ * `dst`. Returns 0 on success, -1 on failure.
+ */
+NPY_NO_EXPORT int
+PyArray_MaskForUpdate(PyArrayObject *dst, int rhs_masked,
+                      PyArrayObject **mask, int *created);
+
+NPY_NO_EXPORT int
+PyArray_FinishMaskUpdate(PyArrayObject *dst, PyArrayObject *mask,
+                         int created, int failed);
+
+/* Raises if `dst` has a mask that is not writeable (checked before data is
+ * touched so an assignment is never half-applied). */
+NPY_NO_EXPORT int
+PyArray_FailUnlessMaskWriteable(PyArrayObject *dst);
+
+/*
+ * In-place shape/strides/dtype/resize changes cannot keep a mask consistent:
+ * raise for an array that has a mask, or that is serving as another array's
+ * mask (changing its shape or dtype would corrupt its owner).
+ */
+NPY_NO_EXPORT int
+PyArray_FailIfMaskedInPlace(PyArrayObject *self, const char *what);
+
+/*
  * This flag is used to mark arrays which we would like to, in the future,
  * turn into views. It causes a warning to be issued on the first attempt to
  * write to the array (but the write is allowed to succeed).

@@ -14,6 +14,7 @@
 #include "lowlevel_strided_loops.h" /* for npy_bswap8 */
 #include "alloc.h"
 #include "ctors.h"
+#include "arrayobject.h"
 #include "common.h"
 #include "dtypemeta.h"
 #include "dtype_transfer.h"
@@ -225,8 +226,8 @@ fail:
  * Returns input array with values inserted sequentially into places
  * indicated by the mask
  */
-NPY_NO_EXPORT PyObject *
-arr_place(PyObject *NPY_UNUSED(self), PyObject *args, PyObject *kwdict)
+static PyObject *
+arr_place_data(PyObject *NPY_UNUSED(self), PyObject *args, PyObject *kwdict)
 {
     char *src, *dest;
     npy_bool *mask_data;
@@ -380,6 +381,57 @@ arr_place(PyObject *NPY_UNUSED(self), PyObject *args, PyObject *kwdict)
     Py_XDECREF(array);
     Py_XDECREF(values);
     return NULL;
+}
+
+
+/*
+ * `np.place`: the identical place runs on the array's mask, with the mask of
+ * `vals` (False if it is not masked).
+ */
+NPY_NO_EXPORT PyObject *
+arr_place(PyObject *self, PyObject *args, PyObject *kwdict)
+{
+    static char *kwlist[] = {"input", "mask", "vals", NULL};
+    PyObject *array0, *mask0, *values0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwdict, "O!OO:place", kwlist,
+                &PyArray_Type, &array0, &mask0, &values0)) {
+        return NULL;
+    }
+    PyArrayObject *arr = (PyArrayObject *)array0;
+    if (PyArray_FailUnlessMaskWriteable(arr) < 0) {
+        return NULL;
+    }
+    PyObject *values_mask = NULL;
+    if (PyArray_Check(values0)) {
+        values_mask = PyArray_MASK((PyArrayObject *)values0);
+    }
+    PyObject *res = arr_place_data(self, args, kwdict);
+    if (res == NULL) {
+        return NULL;
+    }
+    PyArrayObject *mask;
+    int created;
+    int rc = PyArray_MaskForUpdate(arr, values_mask != NULL, &mask, &created);
+    if (rc < 0) {
+        Py_DECREF(res);
+        return NULL;
+    }
+    if (rc == 1) {
+        PyObject *mask_args = PyTuple_Pack(3, (PyObject *)mask, mask0,
+                values_mask != NULL ? values_mask : Py_False);
+        PyObject *r = NULL;
+        if (mask_args != NULL) {
+            r = arr_place_data(self, mask_args, NULL);
+            Py_DECREF(mask_args);
+        }
+        Py_XDECREF(r);
+        if (PyArray_FinishMaskUpdate(arr, mask, created, r == NULL) < 0) {
+            Py_DECREF(res);
+            return NULL;
+        }
+    }
+    return res;
 }
 
 #define LIKELY_IN_CACHE_SIZE 8

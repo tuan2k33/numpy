@@ -142,6 +142,23 @@ interfere with each other.
   NaN or any other sentinel: hiding is non-destructive, and an explicit
   `filled()` (phase 10) is how a user asks for replacement values.
 
+- Gather and combine operations (`take`, `repeat`, `choose`, `where`,
+  `concatenate` and everything built on them) run the identical operation on
+  the mask. Where a data input steers the result (`np.where`'s condition,
+  `np.choose`'s selector) a hidden value hides the result. Scatter operations
+  (`put`, `putmask`, `place`, `copyto`, `fill`, `flat`/`real`/`imag`
+  assignment) follow the assignment rule: assigned elements take the
+  masked-ness of the values.
+- Index-returning operations (`argsort`, `searchsorted`, `nonzero`, `argmax`,
+  ...) are mask-blind: indices carry no mask and the mask never changes which
+  index is returned. Selection parameters (a ufunc's `where=`, `putmask`'s or
+  `copyto`'s condition, `take`'s indices) are plain data whose own masks are
+  ignored.
+- The mask must always have exactly the array's shape. In-place changes to an
+  array's shape, strides, dtype or size (`a.shape = ...`, `a.resize(...)`, ...)
+  cannot honour that and are rejected for an array with a mask or serving as
+  one; use `reshape`/`view`/`astype`/`np.resize`, which return new arrays.
+
 ## Fail-open policy for unsupported operations
 
 While the feature is being built, an operation that has no mask support yet

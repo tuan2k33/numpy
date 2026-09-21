@@ -155,8 +155,32 @@ array_fill(PyArrayObject *self, PyObject *const *args, Py_ssize_t len_args)
             {"", NULL, &obj}) < 0) {
         return NULL;
     }
+    if (PyArray_FailUnlessMaskWriteable(self) < 0) {
+        return NULL;
+    }
     if (PyArray_FillWithScalar(self, obj) < 0) {
         return NULL;
+    }
+    /*
+     * Every element was assigned, so all take the masked-ness of `obj`: a
+     * masked (0-d) value hides everything, anything else unhides everything.
+     */
+    int obj_masked = PyArray_Check(obj) &&
+            PyArray_MASK((PyArrayObject *)obj) != NULL &&
+            PyArray_CountNonzero((PyArrayObject *)PyArray_MASK(
+                    (PyArrayObject *)obj)) > 0;
+    PyArrayObject *mask;
+    int created;
+    int rc = PyArray_MaskForUpdate(self, obj_masked, &mask, &created);
+    if (rc < 0) {
+        return NULL;
+    }
+    if (rc == 1) {
+        int res = PyArray_FillWithScalar(
+                mask, obj_masked ? Py_True : Py_False);
+        if (PyArray_FinishMaskUpdate(self, mask, created, res < 0) < 0) {
+            return NULL;
+        }
     }
     Py_RETURN_NONE;
 }

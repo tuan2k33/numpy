@@ -61,6 +61,10 @@ array_shape_set_internal(PyArrayObject *self, PyObject *val)
     PyArrayObject *ret;
     assert(val);
 
+    if (PyArray_FailIfMaskedInPlace(self, "change the shape") < 0) {
+        return -1;
+    }
+
     /* Assumes C-order */
     ret = (PyArrayObject *)PyArray_Reshape(self, val);
     if (ret == NULL) {
@@ -146,6 +150,10 @@ array_strides_set(PyArrayObject *self, PyObject *obj, void *NPY_UNUSED(ignored))
     if (DEPRECATE("Setting the strides on a NumPy array has been deprecated in NumPy 2.4.\n"
                   "As an alternative, you can create a new view using np.lib.stride_tricks.as_strided."
                  ) < 0 ) {
+        return -1;
+    }
+
+    if (PyArray_FailIfMaskedInPlace(self, "change the strides") < 0) {
         return -1;
     }
 
@@ -355,6 +363,10 @@ array_descr_set_internal(PyArrayObject *self, PyObject *arg)
         newtype == NULL) {
         PyErr_SetString(PyExc_TypeError,
                 "invalid data-type for array");
+        return -1;
+    }
+    if (PyArray_FailIfMaskedInPlace(self, "change the dtype") < 0) {
+        Py_DECREF(newtype);
         return -1;
     }
     /* Check dtype and possibly give new dim & stride for last axis */
@@ -571,6 +583,28 @@ array_real_get(PyArrayObject *self, void *NPY_UNUSED(ignored))
     return _get_part(self, _npy_module_state->n_ops.real, meth, /* need_view */ 0);
 }
 
+/*
+ * `a.real = v` / `a.imag = v` assign every element, so every element takes the
+ * masked-ness of `v` (False if it is not masked).
+ */
+static int
+_assign_part_mask(PyArrayObject *self, PyObject *val)
+{
+    PyObject *val_mask = NULL;
+    if (PyArray_Check(val)) {
+        val_mask = PyArray_MASK((PyArrayObject *)val);
+    }
+    PyArrayObject *mask;
+    int created;
+    int rc = PyArray_MaskForUpdate(self, val_mask != NULL, &mask, &created);
+    if (rc <= 0) {
+        return rc;
+    }
+    int res = PyArray_CopyObject(
+            mask, val_mask != NULL ? val_mask : Py_False);
+    return PyArray_FinishMaskUpdate(self, mask, created, res < 0);
+}
+
 static int
 array_real_set(PyArrayObject *self, PyObject *val, void *NPY_UNUSED(ignored))
 {
@@ -600,8 +634,15 @@ array_real_set(PyArrayObject *self, PyObject *val, void *NPY_UNUSED(ignored))
         }
     }
 
+    if (PyArray_FailUnlessMaskWriteable(self) < 0) {
+        Py_DECREF(part);
+        return -1;
+    }
     int ret = PyArray_CopyObject(part, val);
     Py_DECREF(part);
+    if (ret == 0) {
+        ret = _assign_part_mask(self, val);
+    }
     return ret;
 }
 
@@ -663,8 +704,15 @@ array_imag_set(PyArrayObject *self, PyObject *val, void *NPY_UNUSED(ignored))
         return -1;
     }
 
+    if (PyArray_FailUnlessMaskWriteable(self) < 0) {
+        Py_DECREF(part);
+        return -1;
+    }
     int ret = PyArray_CopyObject(part, val);
     Py_DECREF(part);
+    if (ret == 0) {
+        ret = _assign_part_mask(self, val);
+    }
     return ret;
 }
 
@@ -675,7 +723,46 @@ array_flat_get(PyArrayObject *self, void *NPY_UNUSED(ignored))
 }
 
 static int
-array_flat_set(PyArrayObject *self, PyObject *val, void *NPY_UNUSED(ignored))
+array_flat_set_data(PyArrayObject *self, PyObject *val,
+                    void *NPY_UNUSED(ignored));
+
+/*
+ * `a.flat = v`: the identical flat assignment runs on the mask with the
+ * mask of `v` (False if `v` is not masked).
+ */
+static int
+array_flat_set(PyArrayObject *self, PyObject *val, void *ignored)
+{
+    if (val == NULL) {
+        return array_flat_set_data(self, val, ignored);
+    }
+    if (PyArray_FailUnlessMaskWriteable(self) < 0) {
+        return -1;
+    }
+    PyObject *val_mask = NULL;
+    if (PyArray_Check(val)) {
+        val_mask = PyArray_MASK((PyArrayObject *)val);
+    }
+    if (array_flat_set_data(self, val, ignored) < 0) {
+        return -1;
+    }
+    PyArrayObject *mask;
+    int created;
+    int rc = PyArray_MaskForUpdate(self, val_mask != NULL, &mask, &created);
+    if (rc < 0) {
+        return -1;
+    }
+    if (rc == 1) {
+        int res = array_flat_set_data(
+                mask, val_mask != NULL ? val_mask : Py_False, NULL);
+        return PyArray_FinishMaskUpdate(self, mask, created, res < 0);
+    }
+    return 0;
+}
+
+static int
+array_flat_set_data(PyArrayObject *self, PyObject *val,
+                    void *NPY_UNUSED(ignored))
 {
     PyArrayObject *arr = NULL;
     int retval = -1;
