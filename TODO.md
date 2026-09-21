@@ -3,21 +3,29 @@
 Research fork: give `ndarray` a built-in, opt-in `mask` so operators only need
 `if (mask)` instead of `numpy.ma`'s per-function Python wrappers. Target
 **numpy `main`/dev only** (currently `2.6.0.dev0`); no backport to released
-branches. Track upstream and rebase periodically rather than diverging long-term.
+branches. Track upstream by merging `origin/main` regularly (see the standing rule
+below) rather than diverging long-term.
 
 Design rules live in [`DESIGN.md`](DESIGN.md). This file is the working
 roadmap and validation record.
 
 ## Housekeeping
 
+**Standing rule — sync upstream (not a checkbox; applies at all times):**
+at the start of every session/phase and before every push, run
+`git fetch origin main` → fast-forward local `main` to `origin/main` →
+merge `main` into the feature branch (stash uncommitted WIP first, pop
+after) → rebuild and rerun the plain-array baseline → confirm
+`git rev-list --count HEAD..origin/main` is `0`. Never sync from the
+personal fork's `fork/main`, never push `main`, and note that
+`fork/<branch>` being up to date says nothing about upstream. This is a
+long-running fork of a fast-moving codebase, so drift compounds fast if
+skipped. Every phase checklist below starts with a sync item as a reminder.
+
 - [ ] After every phase implementation, cross-test (pipenv/devenv,
   mask/nomask), review [`DESIGN.md`](DESIGN.md), and check relevant NumPy
   NEPs/current `main` behavior for dispatch, dtype, iterator, and array API
   changes. Verify no regression, leakage, or plain-array behavior change.
-- [ ] Pull from upstream NumPy's `origin/main` every day and before every
-  push. Do not use the personal fork's `fork/main` as the synchronization
-  source — this is a long-running fork of a fast-moving codebase, so drift
-  compounds fast if skipped.
 
 ## Regression baseline
 
@@ -451,15 +459,21 @@ tests from scratch.
       principled mask transform. Currently drops silently; needs a decision
       (raise for masked input, or document as convention).
 - [ ] **6 — Indexing**
+  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
+        merged, `HEAD..origin/main` is 0.
   - [ ] `multiarray/mapping.c` — basic indexing already covered in phase 2;
         advanced/fancy + boolean indexing (copy — build new mask
         explicitly), assignment through indexing
 - [ ] **7 — Gather, scatter, and combine/split**
+  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
+        merged, `HEAD..origin/main` is 0.
   - [ ] Depends on phase 6's index-mapping and assignment semantics.
   - [ ] `npysort/*.c.src`, `multiarray/item_selection.c`
         (`searchsorted`, `take`/`put`/`choose`/`repeat`)
   - [ ] `multiarray/multiarraymodule.c` (`concatenate`, split/stack APIs)
 - [ ] **8 — Casting**
+  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
+        merged, `HEAD..origin/main` is 0.
   - [ ] `multiarray/convert_datatype.c`, `multiarray/convert.c`
   - [ ] `astype`, `PyArray_CastToType` and `np.array/asarray(dtype=...)`
         already carry the mask (done in phase 5). Remaining: audit the other
@@ -468,11 +482,15 @@ tests from scratch.
         dtype currently raises a shape-mismatch error instead of guessing)
         before implementing linear algebra.
 - [ ] **9 — Linear algebra**
+  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
+        merged, `HEAD..origin/main` is 0.
   - [ ] Decide whether masked `matmul`/LAPACK input is rejected, ignored, or
         propagated before changing the implementation.
   - [ ] `umath/matmul.c.src`
   - [ ] `numpy/linalg/umath_linalg.c.src`
 - [ ] **10 — Python-level surface**
+  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
+        merged, `HEAD..origin/main` is 0.
   - [ ] `numpy/_core/arrayprint.py` (repr/str show masked cells)
   - [ ] `numpy/lib/_arraysetops_impl.py` (`unique`/`isin` mask-awareness)
   - [ ] `multiarray/methods.c` (`__reduce__`/pickle, `tobytes`/`tofile`)
