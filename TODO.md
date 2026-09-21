@@ -49,14 +49,17 @@ Current focus:
   - Combined: 14916 passed, 17 skipped, 12 deselected.
   - Match with the previous row: ✅ identical.
 - **Phase 5 — transpose, broadcast, view and dtype-cast mask transport**
-  - `test_multiarray.py` + `test_indexing.py` (`-m "not slow"`): 14932
-    passed, 17 skipped, 12 deselected, 0 failed. The count is 16 higher than
-    the rows above with test files byte-identical to the phase-0 base; it is
-    a collection difference in this environment (not from a code change, no
-    new skips/failures) — re-baseline against it from here on.
+  - `test_multiarray.py` + `test_indexing.py` (`-m "not slow"`): 14937
+    passed, 17 skipped, 12 deselected, 0 failed (measured after merging
+    upstream `main` at `e5cae0a6e2`).
+  - Why this is higher than the 14916 in the rows above: those were measured
+    before the 2026-09-18 `pull --rebase` onto a newer upstream base, which
+    brought upstream's own new tests into `test_multiarray.py` (16 more at
+    `e765e6725e`, 5 more from the 20 commits merged afterwards). None are
+    ours; no new skips or failures. Re-baseline against 14937 from here on.
   - Plus `test_umath.py`, `test_ufunc.py`, `test_shape_base.py`,
-    `numpy/lib/tests/test_stride_tricks.py`: 20931 passed, 77 skipped,
-    12 deselected, 7 xfailed (pre-existing xfails), 0 failed.
+    `numpy/lib/tests/test_stride_tricks.py`: 6016 passed, 60 skipped,
+    7 xfailed (pre-existing xfails), 0 failed.
   - `test_mask.py`: all phase-5 tests pass (the phase-6 WIP tests in the same
     file are excluded from this gate).
   - Match with the plain-array baseline: ✅ no regression.
