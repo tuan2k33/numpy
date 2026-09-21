@@ -1,23 +1,18 @@
 # Benchmarks — informal cross-venv timing log
 
-All timing columns are **milliseconds (ms)**, formatted `min / median`
-over 20-30 repeats (`N=2_000_000` for phase 2-3 ops, `N=500_000` for
-phase 4 ops, `N=1_000_000` for phase 6-8 ops, 500x500 / 300x300 matrices
-(`100_000`-point signal) for phase 9 ops). The last two columns are
-`fork nomask − upstream` and the mask overhead `fork mask − fork nomask`;
-both use the same ms unit. Latest measurement per op only.
+Times are **milliseconds**, `min / median` over 20–30 repeats; latest
+measurement per op only. Sizes: `N=2_000_000` (phases 2–3), `500_000`
+(phase 4), `1_000_000` (phases 6–8), 500x500 / 300x300 matrices and a
+100k-point signal (phase 9). Columns: upstream (release wheel in a separate
+venv), fork without a mask, fork with a mask, `fork nomask − upstream`, and the
+mask overhead `fork mask − fork nomask`.
 
-In each timing cell, `/` separates the minimum and median of the measured
-runs. The table keeps `masked` next to the fork's no-mask baseline for quick
-comparison.
-
-Cross-venv (`fork nomask − upstream`) deltas are noisy (debug vs. release
-build confound) — a single run's delta isn't signal, only a consistent
-one-directional shift across reruns is. The `fork nomask − fork mask`
-column is same-build, so it isn't subject to that confound; ranges shown
-were reran 3x for `add`/`less`/`sin`
-(phase 3) and `reduce`/`accumulate`/`reduceat`/`outer`/`at`/`sum`/`std`
-(phase 4) and stayed positive (masked slower) every single run.
+**How to read it.** The fork build is debugoptimized and the upstream wheel is a
+release build, so cross-venv deltas are noise unless they shift in one
+direction across reruns (`~0` = within ±15%). The mask-overhead column compares
+one build with itself, so it is the real signal; `add`, `less`, `sin` (phase 3)
+and `reduce`/`accumulate`/`reduceat`/`outer`/`at`/`sum`/`std` (phase 4) were
+rerun 3x and stayed positive (masked slower) every time.
 
 | phase | op | upstream | fork nomask | fork mask | fork nomask − upstream | mask overhead (mask − nomask) |
 |---|---|---|---|---|---|---|
@@ -76,3 +71,7 @@ only the same-build masked-vs-unmasked column counts. `einsum` and
 `correlate` derive their mask by running the same operation on the masks
 (twice for two masked operands), hence ~2.2x and ~3x; the matrix products and
 `numpy.linalg` only pay for a couple of `any()` reductions.
+
+Phase 10 (repr, `filled`, pickle, `isin`) was not benchmarked: it adds no cost to
+the unmasked hot paths (a NULL check in `__reduce_ex__`, and Python-side
+branches on `mask is None` in `repr` and `isin`).
