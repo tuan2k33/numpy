@@ -147,6 +147,12 @@ Current focus:
     `test_mask.py` tests, nothing else) with identical skipped/xfailed/
     xpassed counts. Common tests: 50320, **0 status differences**, 0 tests
     missing on either side. Plain arrays behave identically to upstream.
+    Rerun after the default fill value and a further upstream merge
+    (`origin/main` @ 84cd9b6d16): upstream 49226 passed, fork 49513 (+287 =
+    `test_mask.py` only), 50336 common tests, 0 status differences, 0 failures;
+    plus a per-member comparison of every public `ndarray` method/attribute on
+    19 plain array kinds (2736 records): identical except the raw pointer
+    bytes of `object` arrays, which differ between two runs of upstream too.
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
