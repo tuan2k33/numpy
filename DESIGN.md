@@ -156,9 +156,10 @@ interfere with each other.
 
 - Python-level surface (phase 10). `repr`/`str` print a hidden cell as `--`
   and never its value; hidden cells are left out of width/precision
-  decisions. `ndarray.filled(fill_value)` is the one explicit way to get
+  decisions. `ndarray.filled(fill_value=<default>)` is the one way to get
   replacement values: it returns a new plain, unmasked copy and never
-  changes the array. Pickle carries the mask (extra state item; unmasked
+  changes the array. Without an argument it fills with the dtype's NA
+  pattern from `LAYOUTS.md` (rejected dtypes such as `object` raise). Pickle carries the mask (extra state item; unmasked
   pickles are unchanged). The buffer protocol, `tobytes`/`tofile`/`np.save`
   and `tolist` export the data only, hidden values included, no mask.
   `isin` hides an answer when a hidden value could have changed it;

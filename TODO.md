@@ -136,7 +136,7 @@ Current focus:
     up by `np.ma.filled`'s `hasattr(a, 'filled')` duck-typing and by the
     matrix "call every method" test; fixed in `ma/core.py` and
     `test_defmatrix.py`.)
-  - `test_mask.py`: 261 passed.
+  - `test_mask.py`: 261 passed (287 after the default fill value).
   - The per-file baseline rows (multiarray/indexing, umath group) are
     subsumed by the whole-suite run.
   - **Cross-run against upstream** (2026-09-22): the same test tree run on a
@@ -730,8 +730,21 @@ tests from scratch.
         with hidden cells assigned `fill_value` (same conversion as
         `arr[i] = fill_value`, so `a.filled(np.nan)` on an int array raises;
         the value is validated even when nothing is hidden). Never a view,
-        keeps the subclass and layout, `fill_value` is required (no implicit
-        default). Docs in `_add_newdocs.py`, stub in `__init__.pyi`.
+        keeps the subclass and layout. **Default fill value (user decision,
+        2026-09-22):** `filled()` without an argument writes the dtype's NA
+        pattern from `LAYOUTS.md` (copied from the `nulldtype` project):
+        `bool` 0x02, signed ints `INT_MIN`, unsigned ints `UINT_MAX`, floats/
+        complex the quiet NaN with every non-sign bit set (both halves),
+        datetime/timedelta `NaT`, `S`/`V` all 0xFF, `U` U+FFFF per character,
+        structured per field (padding 0, nested records and subarray fields
+        unrolled), `longdouble`/`clongdouble` a plain NaN of their own dtype
+        (no double substitution, no warning). `object`, `StringDType`,
+        unsized `S`/`U`/`V` and user dtypes have no default: `TypeError`
+        (raised even for an unmasked array); an explicit value always works.
+        Non-native byte order is handled (the element is written natively and
+        swapped by the assignment). Note the consequences: the bool default
+        is an out-of-range bool byte, and a `uint8` gap becomes 255, an
+        ordinary value. Docs in `_add_newdocs.py`, stub in `__init__.pyi`.
   - [x] `numpy/lib/_arraysetops_impl.py`: `isin` is mask-aware (rule below).
         `unique` and the set operations built on it (`intersect1d`,
         `setxor1d`, `union1d`, `setdiff1d`, `unique_*`) stay **mask-blind by

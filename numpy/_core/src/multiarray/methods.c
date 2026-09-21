@@ -1226,10 +1226,134 @@ array_copy_keeporder(PyArrayObject *self, PyObject *NPY_UNUSED(ignored))
     return PyArray_NewCopy(self, NPY_KEEPORDER);
 }
 
+/* Store the low `size` bytes of `v` at `dst` in native byte order. */
+static void
+_put_uint(char *dst, npy_intp size, npy_uint64 v)
+{
+    switch (size) {
+        case 1: {npy_uint8 x = (npy_uint8)v; memcpy(dst, &x, 1); break;}
+        case 2: {npy_uint16 x = (npy_uint16)v; memcpy(dst, &x, 2); break;}
+        case 4: {npy_uint32 x = (npy_uint32)v; memcpy(dst, &x, 4); break;}
+        default: {memcpy(dst, &v, 8); break;}
+    }
+}
+
+/* The quiet NaN of LAYOUTS.md: every bit set except the sign. */
+static int
+_put_float_na(char *dst, npy_intp size)
+{
+    if (size == 2 || size == 4 || size == 8) {
+        _put_uint(dst, size, (((npy_uint64)1) << (8 * size - 1)) - 1);
+        return 0;
+    }
+    if (size == (npy_intp)sizeof(npy_longdouble)) {
+        npy_longdouble nan = (npy_longdouble)Py_NAN;
+        memcpy(dst, &nan, sizeof(nan));
+        return 0;
+    }
+    PyErr_SetString(PyExc_TypeError, "unsupported floating point size");
+    return -1;
+}
+
 /*
- * ndarray.filled(fill_value): a plain copy in which every hidden element is
- * replaced by `fill_value` (assigned like `arr[i] = fill_value`, so it must be
- * representable in the dtype). The result never carries a mask and never
+ * Write the default fill value of `filled()` for one element of `descr`
+ * (native byte order) at `dst`: the NA pattern tabulated in LAYOUTS.md.
+ * Dtypes that table rejects (object, StringDType, unsized S/U/V, user
+ * dtypes) have no default: TypeError.
+ */
+static int
+_write_default_fill(PyArray_Descr *descr, char *dst)
+{
+    npy_intp size = PyDataType_ELSIZE(descr);
+
+    if (PyDataType_HASFIELDS(descr)) {
+        /* every field holds the NA of its own type; padding is zero */
+        PyObject *names = PyDataType_NAMES(descr);
+        PyObject *fields = PyDataType_FIELDS(descr);
+        memset(dst, 0, size);
+        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(names); i++) {
+            PyObject *info = PyDict_GetItemWithError(
+                    fields, PyTuple_GET_ITEM(names, i));
+            if (info == NULL) {
+                if (!PyErr_Occurred()) {
+                    PyErr_SetString(PyExc_RuntimeError, "corrupt dtype fields");
+                }
+                return -1;
+            }
+            PyArray_Descr *field_descr =
+                    (PyArray_Descr *)PyTuple_GET_ITEM(info, 0);
+            Py_ssize_t offset = PyLong_AsSsize_t(PyTuple_GET_ITEM(info, 1));
+            if (offset == -1 && PyErr_Occurred()) {
+                return -1;
+            }
+            if (_write_default_fill(field_descr, dst + offset) < 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+    if (PyDataType_HASSUBARRAY(descr)) {
+        /* (only reachable as a record field) unrolled element by element */
+        PyArray_Descr *base = PyDataType_SUBARRAY(descr)->base;
+        npy_intp base_size = PyDataType_ELSIZE(base);
+        for (npy_intp k = 0; base_size > 0 && k < size / base_size; k++) {
+            if (_write_default_fill(base, dst + k * base_size) < 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+
+    switch (descr->kind) {
+        case 'b':
+            dst[0] = 2;                 /* never produced by NumPy */
+            return 0;
+        case 'i':
+        case 'M':
+        case 'm':                       /* INT_MIN; NaT for datetimes */
+            _put_uint(dst, size, ((npy_uint64)1) << (8 * size - 1));
+            return 0;
+        case 'u':                       /* UINT_MAX */
+            _put_uint(dst, size, ~(npy_uint64)0);
+            return 0;
+        case 'f':
+            return _put_float_na(dst, size);
+        case 'c':                       /* the pattern in both halves */
+            if (_put_float_na(dst, size / 2) < 0) {
+                return -1;
+            }
+            return _put_float_na(dst + size / 2, size / 2);
+        case 'S':
+        case 'V':
+            if (size > 0) {
+                memset(dst, 0xFF, size);
+                return 0;
+            }
+            break;
+        case 'U':                       /* U+FFFF, a noncharacter, per char */
+            if (size > 0) {
+                for (npy_intp k = 0; k < size / 4; k++) {
+                    npy_uint32 c = 0xFFFF;
+                    memcpy(dst + 4 * k, &c, 4);
+                }
+                return 0;
+            }
+            break;
+        default:
+            break;
+    }
+    PyErr_Format(PyExc_TypeError,
+            "filled() without a fill_value is not defined for dtype %S "
+            "(no default NA pattern, see LAYOUTS.md); pass a fill_value",
+            (PyObject *)descr);
+    return -1;
+}
+
+/*
+ * ndarray.filled(fill_value=<default>): a plain copy in which every hidden
+ * element is replaced by `fill_value` (assigned like `arr[i] = fill_value`, so
+ * it must be representable in the dtype). Without `fill_value` the dtype's NA
+ * pattern from LAYOUTS.md is used. The result never carries a mask and never
  * shares memory with `self`; an unmasked array is simply copied.
  */
 static PyObject *
@@ -1240,19 +1364,38 @@ array_filled(PyArrayObject *self,
     NPY_PREPARE_ARGPARSER;
 
     if (npy_parse_arguments("filled", args, len_args, kwnames,
-            {"fill_value", NULL, &fill_value}) < 0) {
+            {"|fill_value", NULL, &fill_value}) < 0) {
         return NULL;
     }
 
-    /* Validate `fill_value` even when there is nothing to replace. */
+    /*
+     * Build the fill element (native byte order; the assignment below swaps
+     * if needed). Validated even when there is nothing to replace.
+     */
     PyArray_Descr *descr = PyArray_DESCR(self);
-    Py_INCREF(descr);
+    if (fill_value == NULL && PyDataType_ISLEGACY(descr)) {
+        descr = PyArray_DescrNewByteorder(descr, NPY_NATIVE);
+        if (descr == NULL) {
+            return NULL;
+        }
+    }
+    else {
+        /* (new-style dtypes have no default; `_write_default_fill` says so) */
+        Py_INCREF(descr);
+    }
     PyArrayObject *src = (PyArrayObject *)PyArray_NewFromDescr(
             &PyArray_Type, descr, 0, NULL, NULL, NULL, 0, NULL);
     if (src == NULL) {
         return NULL;
     }
-    if (PyArray_Pack(PyArray_DESCR(src), PyArray_DATA(src), fill_value) < 0) {
+    if (fill_value == NULL) {
+        if (_write_default_fill(PyArray_DESCR(src), PyArray_DATA(src)) < 0) {
+            Py_DECREF(src);
+            return NULL;
+        }
+    }
+    else if (PyArray_Pack(PyArray_DESCR(src), PyArray_DATA(src),
+                          fill_value) < 0) {
         Py_DECREF(src);
         return NULL;
     }

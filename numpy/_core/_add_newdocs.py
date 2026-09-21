@@ -3890,21 +3890,38 @@ _array_method_doc('fill', "value",
 
 # `filled` is an `ndarray` method only (scalars carry no mask).
 _filled_doc = _METHOD_DOC_TEMPLATE.format(
-    name="filled", params="$self, /, fill_value",
+    name="filled", params="$self, /, fill_value=...",
     doc=textwrap.dedent("""
-    a.filled(fill_value)
+    a.filled(fill_value=<default>)
 
     Return a plain copy of the array with the masked elements replaced.
 
     The array itself is left untouched (masking never changes the data), and
-    the result carries no mask. `fill_value` is assigned like
-    ``a[i] = fill_value``, so it must be representable in the dtype of `a`.
-    An array without a mask is simply copied.
+    the result carries no mask. An array without a mask is simply copied.
 
     Parameters
     ----------
-    fill_value : scalar
-        Value stored in place of every masked element.
+    fill_value : scalar, optional
+        Value stored in place of every masked element, assigned like
+        ``a[i] = fill_value`` (so it must be representable in the dtype of
+        `a`). If omitted, the dtype's default fill value is used:
+
+        ==================== ========================================
+        dtype                default
+        ==================== ========================================
+        bool                 byte ``0x02`` (never produced by NumPy)
+        signed integers      the minimum (``INT_MIN``)
+        unsigned integers    the maximum (``UINT_MAX``)
+        floats, complex      quiet NaN with every non-sign bit set
+                             (both halves for complex)
+        datetime, timedelta  ``NaT``
+        ``S``, ``V``         every byte ``0xFF``
+        ``U``                every character ``U+FFFF``
+        structured           each field's own default (padding zero)
+        ==================== ========================================
+
+        ``object``, ``StringDType`` and unsized ``S``/``U``/``V`` have no
+        default: ``filled()`` raises `TypeError`, pass a value.
 
     Returns
     -------
@@ -3916,8 +3933,10 @@ _filled_doc = _METHOD_DOC_TEMPLATE.format(
     >>> import numpy as np
     >>> a = np.array([1.0, 2.0, 3.0])
     >>> a.mask = np.array([False, True, False])
-    >>> a.filled(np.nan)
+    >>> a.filled()
     array([ 1., nan,  3.])
+    >>> a.filled(0.0)
+    array([1., 0., 3.])
     >>> a.mask
     array([False,  True, False])
 """).strip())
