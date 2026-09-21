@@ -245,3 +245,8 @@ accepted ABI risk, as with earlier NumPy struct additions.
   whole output (per matrix in a stack); `solve` also distinguishes the
   columns of `b`. The mask logic is in `numpy/_core/_op_mask.py`; the C
   kernels are untouched. Results that decay to a scalar carry no mask.
+- Decided (final): anything that decays to a scalar stays a plain scalar and
+  carries no mask (reductions over everything, `x[i]`, `det`, `norm`, `v @ v`).
+  That includes results that would depend on hidden cells, e.g. `det` of a
+  matrix with a hidden element. Keep a mask with `axis=`, `keepdims=True` or
+  `out=`; use `filled()` (phase 10) when a plain array is wanted.
