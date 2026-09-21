@@ -135,6 +135,13 @@ interfere with each other.
   whole *records*, not individual fields. Field views (`s["x"]`) currently do
   not carry it; see "Known limitations" in TODO.md.
 
+- Scalars carry no mask (convention). Extracting a single element
+  (`a[i]`) or reducing to a scalar (`a.sum()`) yields an ordinary NumPy
+  scalar; the mask is metadata of arrays only. To keep it, use `axis=`,
+  `keepdims=True` or a 0-d `out=` array. Masked elements are never turned into
+  NaN or any other sentinel: hiding is non-destructive, and an explicit
+  `filled()` (phase 10) is how a user asks for replacement values.
+
 ## Fail-open policy for unsupported operations
 
 While the feature is being built, an operation that has no mask support yet

@@ -538,6 +538,10 @@ tests from scratch.
   - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
         merged, `HEAD..origin/main` is 0.
   - [ ] `numpy/_core/arrayprint.py` (repr/str show masked cells)
+  - [ ] Explicit `filled(fill_value)` (e.g. `a.filled(np.nan)`) to get a
+        plain array with the masked cells replaced — the user's choice, never
+        applied automatically (see the scalar convention in "Known
+        limitations").
   - [ ] `numpy/lib/_arraysetops_impl.py` (`unique`/`isin` mask-awareness)
   - [ ] `multiarray/methods.c` (`__reduce__`/pickle, `tobytes`/`tofile`)
   - [ ] `multiarray/buffer.c` (buffer protocol — decide: expose data only,
@@ -564,7 +568,7 @@ or regression. Every such gap must be listed here so it can be audited later.
 | assignment to a broadcast view with a read-only mask (`np.broadcast_arrays` results: data warns, mask is read-only) | fails before touching data | revisit |
 | `as_strided`/`sliding_window_view` with a stride that is not a whole number of elements, or a mask layout not proportional to the data | mask dropped | revisit (could conform the mask copy to the data layout) |
 | `astype` to a subarray dtype | raises a shape-mismatch `ValueError` (shape changes) | phase 8 |
-| 0-d/scalar results (`np.add.reduce(x)`, `x[0]`, `.flat[i]`, ...) | mask dropped: NumPy decays a 0-d result to a scalar and scalars cannot carry a mask. Convention for now (keep the mask with `axis=`/`keepdims=True`) | open design question: keep a mask-carrying result as a 0-d array instead of decaying (only when a mask would be lost, so plain arrays are unaffected) |
+| 0-d/scalar results (`np.add.reduce(x)`, `x.sum()`, `x.max()`, `x[0]`, `.flat[i]`, elementwise ufuncs on 0-d, ...) | **Convention (decided): a scalar carries no mask.** NumPy decays a 0-d result to a scalar and scalars cannot carry one, so the mask is dropped there. Keep it with `axis=`, `keepdims=True` or `out=` (a 0-d `out` array keeps its mask). Reduce path: `PyUFunc_Reduce` returns a 0-d ndarray, `_propagate_reduce_mask` attaches the mask to it, then `npy_apply_wrap(..., return_scalar)` decays it to a scalar. Elementwise path: the 0-d result is decayed inside `ufunc_generic_fastcall`, before mask propagation runs. Not chosen: NaN-for-masked (float-only, destroys the value, conflates masked with invalid/missing); retaining a 0-d result (would be a one-line `return_scalar &= mask == NULL` on the reduce path plus a re-wrap on the elementwise path) | explicit `filled(fill_value)` in phase 10; revisit 0-d retention only if losing the mask on full reductions proves annoying |
 | where= with `out=None` or multi-output ufuncs | mask propagation skipped | revisit |
 | gufuncs (`matmul`, `linalg`) | mask dropped | phase 9 |
 
