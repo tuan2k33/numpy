@@ -1,0 +1,3 @@
+from typing import Any
+
+def apply(op: Any, inputs: tuple[Any, ...], result: Any, extra: Any = None) -> None: ...

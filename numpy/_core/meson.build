@@ -1519,6 +1519,8 @@ python_sources = [
   '_exceptions.pyi',
   '_internal.py',
   '_internal.pyi',
+  '_op_mask.py',
+  '_op_mask.pyi',
   '_methods.py',
   '_methods.pyi',
   '_simd.pyi',

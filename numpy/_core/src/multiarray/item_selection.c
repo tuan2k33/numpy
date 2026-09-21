@@ -1944,7 +1944,7 @@ PyArray_Choose(PyArrayObject *ip, PyObject *op, PyArrayObject *out,
     PyObject *mask_res = PyArray_Choose_data(ip, masks, NULL, clipmode);
     Py_DECREF(masks);
     if (mask_res != NULL && sel_mask != NULL) {
-        PyObject *merged = PyNumber_Or(mask_res, sel_mask);
+        PyObject *merged = PyArray_MaskOr(mask_res, sel_mask);
         Py_DECREF(mask_res);
         mask_res = merged;
     }

@@ -235,3 +235,13 @@ accepted ABI risk, as with earlier NumPy struct additions.
   infrastructure rather than introducing a parallel runtime dispatcher.
 - Every phase must check the relevant NumPy NEPs and current `main` behavior
   before changing a shared dispatch, dtype, iterator, or array API path.
+
+- Linear algebra follows the same black-box rule: `matmul`/`dot`/`inner`/
+  `einsum`/`correlate`/`numpy.linalg` compute on the whole array, unchanged;
+  the result mask marks an output hidden iff a hidden input element
+  contributes to it (row/column `any` for the matrix products, the same
+  operation run on the masks for `einsum`/`correlate`). LAPACK-backed
+  functions depend on the whole matrix, so a hidden cell hides that matrix's
+  whole output (per matrix in a stack); `solve` also distinguishes the
+  columns of `b`. The mask logic is in `numpy/_core/_op_mask.py`; the C
+  kernels are untouched. Results that decay to a scalar carry no mask.

@@ -29,6 +29,7 @@ maintainer email:  oliphant.travis@ieee.org
 
 #include "numpy/arrayobject.h"
 #include "numpy/arrayscalars.h"
+#include "npy_import.h"
 
 #include "npy_config.h"
 
@@ -403,6 +404,77 @@ PyArray_CopyMaskFrom(PyArrayObject *dst, PyArrayObject *src)
         return -1;
     }
     return PyArray_SetMaskObject(dst, (PyObject *)mask);
+}
+
+
+/*
+ * `a | b` for masks, always as an ndarray: or-ing two 0-d arrays decays to a
+ * numpy bool scalar, which PyArray_SetMaskObject (rightly) refuses.
+ * Returns a new reference or NULL.
+ */
+NPY_NO_EXPORT PyObject *
+PyArray_MaskOr(PyObject *a, PyObject *b)
+{
+    PyObject *res = PyNumber_Or(a, b);
+    if (res == NULL || PyArray_Check(res)) {
+        return res;
+    }
+    PyObject *arr = PyArray_FromAny(
+            res, PyArray_DescrFromType(NPY_BOOL), 0, 0,
+            NPY_ARRAY_ENSUREARRAY, NULL);
+    Py_DECREF(res);
+    return arr;
+}
+
+
+/*
+ * Hook for the contracting operations (gufuncs, dot, inner, einsum,
+ * correlate): if any of `inputs` (a tuple) is a masked array, or `result`
+ * (an array or tuple of arrays, e.g. an `out=`) still carries a mask, ask
+ * numpy/_core/_op_mask.py to derive and attach the result mask(s). `op` is
+ * the ufunc or the name of the operation; `extra` is operation specific.
+ * Costs one scan of the inputs on the plain-array path.
+ *
+ * Returns 0 on success (including "nothing to do"), -1 with an exception set.
+ */
+NPY_NO_EXPORT int
+PyArray_PropagateOpMask(PyObject *op, PyObject *inputs, PyObject *result,
+                        PyObject *extra)
+{
+    int needed = 0;
+    Py_ssize_t n = PyTuple_GET_SIZE(inputs);
+    for (Py_ssize_t i = 0; i < n && !needed; i++) {
+        PyObject *x = PyTuple_GET_ITEM(inputs, i);
+        needed = PyArray_Check(x) && PyArray_MASK((PyArrayObject *)x) != NULL;
+    }
+    if (!needed) {
+        if (PyTuple_Check(result)) {
+            for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(result) && !needed; i++) {
+                PyObject *x = PyTuple_GET_ITEM(result, i);
+                needed = PyArray_Check(x) &&
+                        PyArray_MASK((PyArrayObject *)x) != NULL;
+            }
+        }
+        else {
+            needed = PyArray_Check(result) &&
+                    PyArray_MASK((PyArrayObject *)result) != NULL;
+        }
+    }
+    if (!needed) {
+        return 0;
+    }
+    PyObject *apply = npy_import("numpy._core._op_mask", "apply");
+    if (apply == NULL) {
+        return -1;
+    }
+    PyObject *res = PyObject_CallFunctionObjArgs(
+            apply, op, inputs, result, extra != NULL ? extra : Py_None, NULL);
+    Py_DECREF(apply);
+    if (res == NULL) {
+        return -1;
+    }
+    Py_DECREF(res);
+    return 0;
 }
 
 

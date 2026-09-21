@@ -38,7 +38,8 @@ Current focus:
 - **Phase 6:** done (advanced/fancy and boolean indexing, assignment, `.flat`).
 - **Phase 7:** done (gather/scatter/combine, in-place mutator guards).
 - **Phase 8:** done (casting audit: `view(dtype)`, `np.array(ndmin=)`, `np.array([masked, ...])`, subarray `astype`).
-- **Phase 9:** next — linear algebra.
+- **Phase 9:** done (contracting ops and `numpy.linalg`).
+- **Phase 10:** next — Python surface (repr, `filled()`, unique/isin, pickle, buffer).
 - Phase 5 is complete (incl. `astype`/`flatten`/`diagonal`/`real`/`imag`); keep the cross-test, design review, NEP review, and
   plain-array baseline as the gate for every change.
 
@@ -113,6 +114,18 @@ Current focus:
     subprocesses that need it; without it they fail with "No module named
     numpy", which is environment, not a regression).
   - `test_mask.py`: 177 passed.
+
+- **Phase 9 — linear algebra (matmul/dot/inner/einsum/correlate/linalg)**
+  - Merged upstream first (behind 0).
+  - `test_multiarray.py` + `test_indexing.py` (`-m "not slow"`): 14937
+    passed, 17 skipped — ✅ identical to phases 5–8.
+  - `test_umath.py`, `test_ufunc.py`, `test_shape_base.py`,
+    `test_stride_tricks.py`: 6016 passed, 60 skipped, 7 xfailed — ✅ identical.
+  - Widened gate: 23466 passed, 151 skipped, 7 xfailed — ✅ identical.
+  - `numpy/linalg`: 520 passed, 1 skipped, 1 xfailed.
+  - Whole suite (`pytest numpy -m "not slow" -n 4`, with `PYTHONPATH`):
+    49419 passed, 1051 skipped, 57 xfailed, 1 xpassed, 0 failed.
+  - `test_mask.py`: 208 passed.
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
@@ -637,13 +650,47 @@ tests from scratch.
         `np.array(list)`/`ndmin`/subarray against masks built with NumPy,
         0 mismatches; RSS + refcount leak check (20000 iterations incl.
         error paths): flat.
-- [ ] **9 — Linear algebra**
-  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
-        merged, `HEAD..origin/main` is 0.
-  - [ ] Decide whether masked `matmul`/LAPACK input is rejected, ignored, or
-        propagated before changing the implementation.
-  - [ ] `umath/matmul.c.src`
-  - [ ] `numpy/linalg/umath_linalg.c.src`
+- [x] **9 — Linear algebra**
+  - [x] Sync upstream first (standing rule in Housekeeping): `origin/main`
+        merged, `HEAD..origin/main` was 0 before the work.
+  - [x] Decision (user): follow the existing convention — the whole array is
+        computed as usual (masked cells included), the mask follows. No
+        rejecting, no changes to `matmul.c.src`/`umath_linalg.c.src` (the
+        kernels stay byte-identical). Rule: an output element is hidden iff a
+        hidden input element *contributes* to it.
+  - [x] Mask logic lives in `numpy/_core/_op_mask.py` (Python; only reached when
+        an input or `out=` carries a mask). C hooks call it through
+        `PyArray_PropagateOpMask` (`arrayobject.c`): `ufunc_generic_vectorcall`
+        for gufuncs, and wrappers (`*_data` originals kept unmodified) around
+        `PyArray_MatrixProduct2` (`dot`/`ndarray.dot`), `PyArray_InnerProduct`,
+        `PyArray_Correlate`/`Correlate2` (`correlate`/`convolve`) and
+        `array_einsum`. `tensordot`, `matrix_power`, `multi_dot`, `pinv`, ...
+        need nothing: they are built from the above.
+  - [x] Exact rules: `matmul` (`ra[..., :, None] | cb[..., None, :]` with
+        `ra = any(mask_a, -1)`, `cb = any(mask_b, -2)`; 1-d operands drop that
+        axis), `matvec`/`vecmat`/`vecdot`, `dot`, `inner`; `einsum` and
+        `correlate`/`convolve` run the very same operation on the masks (a
+        float32 count, `> 0`, per masked operand, others replaced by ones), so
+        subscripts/ellipsis/`optimize=`/modes come for free.
+  - [x] `numpy.linalg` gufuncs (`inv`, `eigh`/`eigvalsh`, `eig`, `svd`,
+        `cholesky`, `qr`, `lstsq`, `det`, ...): conservative generic rule from
+        the gufunc signature — every output element of a matrix is hidden if
+        *any* element of that matrix is (each output depends on the whole
+        input matrix), per matrix of a stack. `solve` is finer: hidden by
+        column of `b`, but wholly hidden by any hidden element of `a`.
+        `qr`: NumPy runs `qr_r_raw` in place on a copy of `a` and reads R from
+        it, so that gufunc also updates `a`'s mask; R's strictly lower
+        triangle is structurally zero and stays visible.
+  - [x] Bugs found on the way: `multiply(a1, b2, out=cp0)` with 0-d masked
+        operands raised `TypeError: mask must be an ndarray of dtype bool`
+        (`np.cross` on masked vectors): or-ing two 0-d masks returns a numpy
+        bool scalar. New `PyArray_MaskOr` (always an ndarray) replaces every
+        `PyNumber_Or` on masks (ufunc, `where`, `choose`).
+  - [x] Tests: `TestMaskLinalg` (brute-force reference for matmul incl.
+        batch/broadcast/1-d, dot for six shape pairs, inner, tensordot,
+        einsum incl. list form/`optimize`/`out`, correlate/convolve all modes,
+        every linalg function above, stacks, subclass-with-own-`mask`).
+        RSS + refcount leak check (3000 iterations incl. error paths): flat.
 - [ ] **10 — Python-level surface**
   - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
         merged, `HEAD..origin/main` is 0.
@@ -684,7 +731,9 @@ or regression. Every such gap must be listed here so it can be audited later.
 | `np.array(list_of_masked, dtype=object, ndmax=k)` with `ndmax` smaller than the depth | the masked arrays become *object elements* of the result, so the result has no mask (by construction, nothing per-element to mask); without `ndmax`, `dtype=object` carries the mask | by design |
 | 0-d/scalar results (`np.add.reduce(x)`, `x.sum()`, `x.max()`, `x[0]`, `.flat[i]`, elementwise ufuncs on 0-d, ...) | **Convention (decided): a scalar carries no mask.** NumPy decays a 0-d result to a scalar and scalars cannot carry one, so the mask is dropped there. Keep it with `axis=`, `keepdims=True` or `out=` (a 0-d `out` array keeps its mask). Reduce path: `PyUFunc_Reduce` returns a 0-d ndarray, `_propagate_reduce_mask` attaches the mask to it, then `npy_apply_wrap(..., return_scalar)` decays it to a scalar. Elementwise path: the 0-d result is decayed inside `ufunc_generic_fastcall`, before mask propagation runs. Not chosen: NaN-for-masked (float-only, destroys the value, conflates masked with invalid/missing); retaining a 0-d result (would be a one-line `return_scalar &= mask == NULL` on the reduce path plus a re-wrap on the elementwise path) | explicit `filled(fill_value)` in phase 10; revisit 0-d retention only if losing the mask on full reductions proves annoying |
 | where= with `out=None` or multi-output ufuncs | mask propagation skipped | revisit |
-| gufuncs (`matmul`, `linalg`) | mask dropped | phase 9 |
+| Scalar results of contracting ops (`v @ v`, `np.vdot`, `np.linalg.det`/`slogdet`/`norm`/`trace` of one matrix, 1-d `dot`/`inner`/`einsum(..., '->')`) | scalar convention (above): the mask is dropped. A stack (`det(stack)`) keeps it | explicit `filled()` in phase 10 |
+| Coarse linalg masks | every output of `inv`/`eig`/`svd`/`cholesky`/`qr`/`lstsq`... is hidden for the whole matrix if any element of it is hidden (an over-approximation of the true dependence for eigen-/singular-vectors is impossible to refine without knowing the algorithm) | by design |
+| `vdot`, `np.cross`/any `out=` into a *view of an unmasked array* (`multiply(a1, b2, out=cp[..., 0])`) | `vdot` returns a scalar; the view's own mask cannot reach the parent (see the `out=` row above), so `np.cross` of masked vectors returns the right data with no mask | revisit with the `out=` row |
 
 <details>
 <summary>Performance backlog (not an active phase)</summary>

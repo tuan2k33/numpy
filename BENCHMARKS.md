@@ -2,7 +2,8 @@
 
 All timing columns are **milliseconds (ms)**, formatted `min / median`
 over 20-30 repeats (`N=2_000_000` for phase 2-3 ops, `N=500_000` for
-phase 4 ops, `N=1_000_000` for phase 6-8 ops). The last two columns are
+phase 4 ops, `N=1_000_000` for phase 6-8 ops, 500x500 / 300x300 matrices
+(`100_000`-point signal) for phase 9 ops). The last two columns are
 `fork nomask − upstream` and the mask overhead `fork mask − fork nomask`;
 both use the same ms unit. Latest measurement per op only.
 
@@ -63,3 +64,15 @@ were reran 3x for `add`/`less`/`sin`
 | 8 | `a.view(uint32)` | ~0 | ~0 | 0.04 / 0.04 | ~0 | +0.04 |
 | 8 | `np.array(a, ndmin=3)` | 0.11 / 0.13 | 0.10 / 0.13 | 0.24 / 0.51 | ~0 | +0.12–0.14 |
 | 8 | `np.array([a, b])` | 0.74 / 1.21 | 0.60 / 0.96 | 1.22 / 1.58 | ~0 (noisy, flips sign) | +0.52–0.62 |
+| 9 | `a @ b` (500x500) | 1.28 / 9.89 (BLAS) | 115.36 / 117.84 | 116.09 / 121.12 | n/a (fork build has no optimized BLAS) | +0.73–0.90 |
+| 9 | `np.dot(a, b)` (500x500) | 1.53 / 5.48 (BLAS) | 116.32 / 118.26 | 116.05 / 119.97 | n/a (no BLAS) | ~0 (noisy, flips sign) |
+| 9 | `np.einsum('ij,jk->ik')` (500x500) | 26.11 / 27.15 | 26.38 / 30.54 | 59.71 / 62.24 | ~0 | +31–33 |
+| 9 | `np.linalg.inv` (300x300) | 0.94 / 1.70 (BLAS) | 14.63 / 15.50 | 14.30 / 15.01 | n/a (no BLAS) | ~0 (noisy, flips sign) |
+| 9 | `np.correlate(v, k, 'same')` (100k, 64) | 2.22 / 2.33 | 4.06 / 4.26 | 12.39 / 12.67 | +1.8 (debug build) | +8.3 |
+
+Phase 9 note: the fork's local build is not linked against an optimized BLAS
+(the upstream wheel is), so matmul/dot/inv cross-venv deltas are meaningless;
+only the same-build masked-vs-unmasked column counts. `einsum` and
+`correlate` derive their mask by running the same operation on the masks
+(twice for two masked operands), hence ~2.2x and ~3x; the matrix products and
+`numpy.linalg` only pay for a couple of `any()` reductions.

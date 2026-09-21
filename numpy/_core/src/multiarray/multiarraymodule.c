@@ -948,11 +948,82 @@ PyArray_CanCoerceScalar(int thistype, int neededtype,
 
 /* Could perhaps be redone to not make contiguous arrays */
 
+/*
+ * Result-mask hook shared by the contracting operations below (the wrappers
+ * around the original, unmodified implementations): see
+ * numpy/_core/_op_mask.py. Takes ownership of `ret`.
+ */
+static inline int
+_masked_obj(PyObject *x)
+{
+    return x != NULL && PyArray_Check(x) &&
+            PyArray_MASK((PyArrayObject *)x) != NULL;
+}
+
+static PyObject *
+_op_mask_result_extra(const char *name, PyObject *ret, PyObject *a,
+                      PyObject *b, PyObject *extra)
+{
+    if (ret == NULL) {
+        return NULL;
+    }
+    if (!_masked_obj(a) && !_masked_obj(b) && !_masked_obj(ret)) {
+        return ret;
+    }
+    PyObject *op = PyUnicode_FromString(name);
+    PyObject *inputs = PyTuple_Pack(2, a, b);
+    int res = -1;
+    if (op != NULL && inputs != NULL) {
+        res = PyArray_PropagateOpMask(op, inputs, ret, extra);
+    }
+    Py_XDECREF(op);
+    Py_XDECREF(inputs);
+    if (res < 0) {
+        Py_DECREF(ret);
+        return NULL;
+    }
+    return ret;
+}
+
+#define _op_mask_result(name, ret, a, b, extra) \
+        _op_mask_result_extra(name, ret, a, b, extra)
+
+static PyObject *
+_op_mask_result_mode(const char *name, PyObject *ret, PyObject *a,
+                     PyObject *b, int mode)
+{
+    if (ret == NULL || (!_masked_obj(a) && !_masked_obj(b) &&
+                        !_masked_obj(ret))) {
+        return ret;
+    }
+    PyObject *extra = PyLong_FromLong(mode);
+    if (extra == NULL) {
+        Py_DECREF(ret);
+        return NULL;
+    }
+    ret = _op_mask_result_extra(name, ret, a, b, extra);
+    Py_DECREF(extra);
+    return ret;
+}
+
+static PyObject *
+_matrix_product2_data(PyObject *op1, PyObject *op2, PyArrayObject* out);
+
+static PyObject *
+_inner_product_data(PyObject *op1, PyObject *op2);
+
 /*NUMPY_API
  * Numeric.innerproduct(a,v)
  */
 NPY_NO_EXPORT PyObject *
 PyArray_InnerProduct(PyObject *op1, PyObject *op2)
+{
+    PyObject *ret = _inner_product_data(op1, op2);
+    return _op_mask_result("inner", ret, op1, op2, NULL);
+}
+
+static PyObject *
+_inner_product_data(PyObject *op1, PyObject *op2)
 {
     PyArrayObject *ap1 = NULL;
     PyArrayObject *ap2 = NULL;
@@ -1009,7 +1080,7 @@ PyArray_InnerProduct(PyObject *op1, PyObject *op2)
         Py_INCREF(ap2);
     }
 
-    ret = PyArray_MatrixProduct2((PyObject *)ap1, ap2t, NULL);
+    ret = _matrix_product2_data((PyObject *)ap1, ap2t, NULL);
     if (ret == NULL) {
         goto fail;
     }
@@ -1040,12 +1111,22 @@ PyArray_MatrixProduct(PyObject *op1, PyObject *op2)
     return PyArray_MatrixProduct2(op1, op2, NULL);
 }
 
+static PyObject *
+_matrix_product2_data(PyObject *op1, PyObject *op2, PyArrayObject* out);
+
 /*NUMPY_API
  * Numeric.matrixproduct2(a,v,out)
  * just like inner product but does the swapaxes stuff on the fly
  */
 NPY_NO_EXPORT PyObject *
 PyArray_MatrixProduct2(PyObject *op1, PyObject *op2, PyArrayObject* out)
+{
+    PyObject *ret = _matrix_product2_data(op1, op2, out);
+    return _op_mask_result("dot", ret, op1, op2, NULL);
+}
+
+static PyObject *
+_matrix_product2_data(PyObject *op1, PyObject *op2, PyArrayObject* out)
 {
     PyArrayObject *ap1, *ap2, *out_buf = NULL, *result = NULL;
     PyArrayIterObject *it1, *it2;
@@ -1385,6 +1466,9 @@ _pyarray_revert(PyArrayObject *ret)
     return 0;
 }
 
+static PyObject *
+_correlate2_data(PyObject *op1, PyObject *op2, int mode);
+
 /*NUMPY_API
  * correlate(a1,a2,mode)
  *
@@ -1393,6 +1477,13 @@ _pyarray_revert(PyArrayObject *ret)
  */
 NPY_NO_EXPORT PyObject *
 PyArray_Correlate2(PyObject *op1, PyObject *op2, int mode)
+{
+    PyObject *ret = _correlate2_data(op1, op2, mode);
+    return _op_mask_result_mode("correlate2", ret, op1, op2, mode);
+}
+
+static PyObject *
+_correlate2_data(PyObject *op1, PyObject *op2, int mode)
 {
     PyArrayObject *ap1, *ap2, *ret = NULL;
     PyArray_Descr *typec = NULL;
@@ -1469,11 +1560,21 @@ clean_ap1:
     return NULL;
 }
 
+static PyObject *
+_correlate_data(PyObject *op1, PyObject *op2, int mode);
+
 /*NUMPY_API
  * Numeric.correlate(a1,a2,mode)
  */
 NPY_NO_EXPORT PyObject *
 PyArray_Correlate(PyObject *op1, PyObject *op2, int mode)
+{
+    PyObject *ret = _correlate_data(op1, op2, mode);
+    return _op_mask_result_mode("correlate", ret, op1, op2, mode);
+}
+
+static PyObject *
+_correlate_data(PyObject *op1, PyObject *op2, int mode)
 {
     PyArrayObject *ap1, *ap2, *ret = NULL;
     int unused;
@@ -3148,6 +3249,31 @@ array_einsum(PyObject *NPY_UNUSED(dummy),
     ret = (PyObject *)PyArray_EinsteinSum(subscripts, nop, op, dtype,
                                           order, casting, out);
 
+    if (ret != NULL && (PyArray_NDIM((PyArrayObject *)ret) > 0 || out != NULL)) {
+        /* Mask of the result (a 0-d result without `out` decays to a scalar). */
+        int any_mask = _masked_obj(ret);
+        for (int i = 0; i < nop && !any_mask; i++) {
+            any_mask = _masked_obj((PyObject *)op[i]);
+        }
+        if (any_mask) {
+            PyObject *inputs = PyTuple_New(nargs);
+            PyObject *name = PyUnicode_FromString("einsum");
+            int res = -1;
+            if (inputs != NULL && name != NULL) {
+                for (Py_ssize_t i = 0; i < nargs; i++) {
+                    Py_INCREF(args[i]);
+                    PyTuple_SET_ITEM(inputs, i, args[i]);
+                }
+                res = PyArray_PropagateOpMask(name, inputs, ret, NULL);
+            }
+            Py_XDECREF(inputs);
+            Py_XDECREF(name);
+            if (res < 0) {
+                Py_CLEAR(ret);
+            }
+        }
+    }
+
     /* If no output was supplied, possibly convert to a scalar */
     if (ret != NULL && out == NULL) {
         ret = PyArray_Return((PyArrayObject *)ret);
@@ -3652,7 +3778,7 @@ PyArray_Where(PyObject *condition, PyObject *x, PyObject *y)
     Py_XDECREF(mask_x);
     Py_XDECREF(mask_y);
     if (mask != NULL && cond_mask != NULL) {
-        PyObject *merged = PyNumber_Or(mask, cond_mask);
+        PyObject *merged = PyArray_MaskOr(mask, cond_mask);
         Py_DECREF(mask);
         mask = merged;
     }

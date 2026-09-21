@@ -5345,8 +5345,8 @@ fail:
  *   - A 0-d result that decays to a plain Python/numpy scalar (not a
  *     PyArrayObject) can't carry a mask -- that piece of information is
  *     dropped for that call, since scalar types have no `mask` field.
- *   - gufuncs (`ufunc->core_enabled`, e.g. `matmul`) are excluded --
- *     that's phase 9.
+ *   - gufuncs (`ufunc->core_enabled`, e.g. `matmul`) take a different
+ *     route (phase 9): `PyArray_PropagateOpMask` / numpy/_core/_op_mask.py.
  */
 static PyObject *
 _ufunc_call_kwarg_value(PyObject *const *args, Py_ssize_t nargs,
@@ -5387,7 +5387,7 @@ _propagate_ufunc_result_mask(PyUFuncObject *ufunc,
             combined_mask = m;
         }
         else {
-            PyObject *next = PyNumber_Or(combined_mask, m);
+            PyObject *next = PyArray_MaskOr(combined_mask, m);
             Py_DECREF(combined_mask);
             if (next == NULL) {
                 return -1;
@@ -5472,7 +5472,7 @@ _propagate_ufunc_result_mask(PyUFuncObject *ufunc,
             ret = -1;
             break;
         }
-        PyObject *full_mask = PyNumber_Or(combined_mask, zeros);
+        PyObject *full_mask = PyArray_MaskOr(combined_mask, zeros);
         Py_DECREF(zeros);
         if (full_mask == NULL) {
             ret = -1;
@@ -5544,7 +5544,25 @@ ufunc_generic_vectorcall(PyObject *ufunc,
             args, nargs, kwnames, NPY_FALSE);
 
     PyUFuncObject *uf = (PyUFuncObject *)ufunc;
-    if (result != NULL && !uf->core_enabled) {
+    if (result != NULL && uf->core_enabled) {
+        /* gufuncs (matmul, linalg, ...): see numpy/_core/_op_mask.py */
+        PyObject *inputs = PyTuple_New(uf->nin < nargs ? uf->nin : nargs);
+        if (inputs == NULL) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(inputs); i++) {
+            Py_INCREF(args[i]);
+            PyTuple_SET_ITEM(inputs, i, args[i]);
+        }
+        int res = PyArray_PropagateOpMask(ufunc, inputs, result, NULL);
+        Py_DECREF(inputs);
+        if (res < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+    }
+    else if (result != NULL && !uf->core_enabled) {
         PyObject *where_obj = _ufunc_call_kwarg_value(
                 args, nargs, kwnames, "where");
         PyObject *out_obj = _ufunc_call_kwarg_value(

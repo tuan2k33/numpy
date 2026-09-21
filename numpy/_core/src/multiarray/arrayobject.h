@@ -34,6 +34,13 @@ clear_array_attributes(PyArrayObject *self);
 NPY_NO_EXPORT int
 PyArray_SetMaskObject(PyArrayObject *arr, PyObject *obj);
 
+NPY_NO_EXPORT PyObject *
+PyArray_MaskOr(PyObject *a, PyObject *b);
+
+NPY_NO_EXPORT int
+PyArray_PropagateOpMask(PyObject *op, PyObject *inputs, PyObject *result,
+                        PyObject *extra);
+
 /*
  * Mask transport helpers for ops that produce a new array of the *same
  * shape* as `src`: no-ops when `src` is unmasked. `CopyMaskFrom` attaches an

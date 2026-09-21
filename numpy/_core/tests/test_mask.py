@@ -1605,3 +1605,282 @@ class TestMaskSubclassNamespace:
         assert r.mask is np.ma.nomask
         v = np.ma.mvoid((1, 2), mask=(0, 1), dtype="i4,i4")
         assert np.broadcast_to(v, (), subok=True) is not None
+
+
+def _hidden(shape, seed, p=0.25, dtype=float):
+    """A float array with a random mask (at least one hidden element)."""
+    rng = np.random.default_rng(seed)
+    a = rng.random(shape).astype(dtype) + 1
+    m = rng.random(shape) < p
+    m.flat[0] = True
+    a.mask = m
+    return a
+
+
+def _plain(a):
+    """An unmasked copy of `a` (np.asarray/view would keep the mask)."""
+    r = np.array(a)
+    r.mask = None
+    return r
+
+
+class TestMaskLinalg:
+    """Phase 9: contracting ops. The data is computed as usual on the whole
+    array; an output element is hidden iff a hidden input element contributes."""
+
+    @staticmethod
+    def _matmul_ref(ma, mb):
+        m, k = ma.shape[-2:]
+        n = mb.shape[-1]
+        out = np.zeros(np.broadcast_shapes(ma.shape[:-2], mb.shape[:-2]) + (m, n),
+                       bool)
+        for idx in np.ndindex(*out.shape[:-2]):
+            ia = tuple(i if s > 1 else 0 for i, s in
+                       zip(idx[len(idx) - ma.ndim + 2:], ma.shape[:-2]))
+            ib = tuple(i if s > 1 else 0 for i, s in
+                       zip(idx[len(idx) - mb.ndim + 2:], mb.shape[:-2]))
+            for i in range(m):
+                for j in range(n):
+                    out[idx + (i, j)] = any(
+                        ma[ia + (i, kk)] or mb[ib + (kk, j)] for kk in range(k))
+        return out
+
+    def test_matmul_2d_matches_definition(self):
+        a, b = _hidden((4, 3), 1), _hidden((3, 5), 2)
+        r = a @ b
+        assert np.array_equal(r.mask, self._matmul_ref(a.mask, b.mask))
+        assert np.array_equal(_plain(r), _plain(a) @ _plain(b))  # data untouched
+
+    def test_matmul_only_one_operand_masked(self):
+        a = _hidden((4, 3), 3)
+        b = np.arange(15.).reshape(3, 5)
+        assert np.array_equal((a @ b).mask, self._matmul_ref(a.mask, np.zeros((3, 5), bool)))
+        assert np.array_equal((b.T @ a.T).mask,
+                              self._matmul_ref(np.zeros((5, 3), bool), a.mask.T))
+
+    def test_matmul_batched_and_broadcast(self):
+        a, b = _hidden((2, 1, 4, 3), 4, p=0.1), _hidden((5, 3, 2), 5, p=0.1)
+        r = a @ b
+        assert r.shape == (2, 5, 4, 2)
+        assert np.array_equal(r.mask, self._matmul_ref(a.mask, b.mask))
+
+    def test_matmul_vectors_change_dimensionality(self):
+        A, v = _hidden((4, 3), 6), _hidden((3,), 7)
+        r = A @ v                                   # (4,)
+        assert r.shape == (4,)
+        assert np.array_equal(r.mask, self._matmul_ref(A.mask, v.mask[:, None])[:, 0])
+        r = v @ A.T                                 # (4,)
+        assert np.array_equal(r.mask, self._matmul_ref(v.mask[None], A.mask.T)[0])
+        # vector @ vector is a scalar: a scalar carries no mask (convention)
+        assert not hasattr(v @ v, "mask")
+
+    def test_matmul_out_replaces_mask_and_unmasked_inputs_clear_it(self):
+        a, b = _hidden((3, 3), 8), _hidden((3, 3), 9)
+        out = np.empty((3, 3))
+        assert np.matmul(a, b, out=out) is out
+        assert np.array_equal(out.mask, self._matmul_ref(a.mask, b.mask))
+        np.matmul(_plain(a), _plain(b), out=out)      # unmasked inputs
+        assert out.mask is None
+
+    def test_unmasked_matmul_stays_unmasked(self):
+        a = np.arange(6.).reshape(2, 3)
+        assert (a @ a.T).mask is None
+
+    def test_vecdot_matvec_vecmat(self):
+        A, B = _hidden((4, 3), 10), _hidden((4, 3), 11)
+        v = _hidden((3,), 12)
+        assert np.array_equal(np.vecdot(A, B).mask, A.mask.any(-1) | B.mask.any(-1))
+        assert np.array_equal(np.matvec(A, v).mask, A.mask.any(-1) | v.mask.any())
+        assert np.array_equal(np.vecmat(v, A.T).mask, v.mask.any() | A.mask.T.any(-2))
+        assert np.array_equal(np.matvec(_plain(A), v).mask, np.full(4, v.mask.any()))
+
+    @pytest.mark.parametrize("shapes", [((4, 3), (3, 5)), ((4, 3), (3,)),
+                                        ((2, 4, 3), (3, 5)), ((2, 4, 3), (5, 3, 6)),
+                                        ((3,), (3, 5)), ((3,), (2, 3, 5))])
+    def test_dot_matches_definition(self, shapes):
+        a, b = _hidden(shapes[0], 20), _hidden(shapes[1], 21)
+        r = np.dot(a, b)
+        exp = np.zeros(r.shape, bool)
+        for ia in np.ndindex(*a.shape[:-1]):
+            for ib in np.ndindex(*((b.shape[:-2] + b.shape[-1:]) if b.ndim > 1 else ())):
+                bidx = ib[:-1] + (slice(None),) + ib[-1:] if b.ndim > 1 else (slice(None),)
+                exp[ia + ib] = (a.mask[ia].any() or b.mask[bidx].any())
+        assert np.array_equal(r.mask, exp)
+        assert np.array_equal(_plain(r), np.dot(_plain(a), _plain(b)))
+        assert np.array_equal(a.dot(b).mask, exp)
+
+    def test_dot_with_scalar_and_out(self):
+        a = _hidden((3, 3), 22)
+        assert np.array_equal(np.dot(a, 2.0).mask, a.mask)
+        out = np.empty((3, 3))
+        np.dot(a, np.eye(3), out=out)
+        assert np.array_equal(out.mask, np.broadcast_to(a.mask.any(-1)[:, None], (3, 3)))
+
+    def test_inner_and_tensordot(self):
+        a, b = _hidden((4, 3), 23), _hidden((5, 3), 24)
+        r = np.inner(a, b)
+        assert np.array_equal(r.mask, a.mask.any(-1)[:, None] | b.mask.any(-1)[None])
+        t = np.tensordot(a, b, axes=([1], [1]))
+        assert np.array_equal(t.mask, r.mask)
+        c, d = _hidden((2, 3, 4), 25), _hidden((4, 3, 5), 26)
+        t = np.tensordot(c, d, axes=([1, 2], [1, 0]))
+        exp = (c.mask.any((1, 2))[:, None] | d.mask.any((0, 1))[None])
+        assert np.array_equal(t.mask, exp)
+
+    def test_einsum(self):
+        a, b = _hidden((4, 3), 30), _hidden((3, 5), 31)
+        r = np.einsum("ij,jk->ik", a, b)
+        assert np.array_equal(r.mask, self._matmul_ref(a.mask, b.mask))
+        assert np.array_equal(np.einsum(a, [0, 1], b, [1, 2], [0, 2]).mask, r.mask)
+        t = np.einsum("ij->ji", a)
+        assert np.array_equal(t.mask, a.mask.T)
+        s = _hidden((3, 3), 32)
+        assert np.array_equal(np.einsum("ii->i", s).mask, np.diagonal(s.mask))
+        assert np.array_equal(np.einsum("ij->i", a).mask, a.mask.any(-1))
+        # batched with an ellipsis
+        c, d = _hidden((2, 4, 3), 33, p=0.1), _hidden((2, 3, 5), 34, p=0.1)
+        assert np.array_equal(np.einsum("...ij,...jk->...ik", c, d).mask,
+                              self._matmul_ref(c.mask, d.mask))
+        # only one operand masked / result is a scalar
+        assert np.array_equal(np.einsum("ij,jk->ik", a, _plain(b)).mask,
+                              self._matmul_ref(a.mask, np.zeros((3, 5), bool)))
+        assert not hasattr(np.einsum("ij,ij->", a, a), "mask")
+        assert np.einsum("ij,jk->ik", _plain(a), _plain(b)).mask is None
+
+    def test_einsum_optimize_and_out(self):
+        a, b, c = _hidden((3, 4), 35), _hidden((4, 5), 36), _hidden((5, 2), 37)
+        r = np.einsum("ij,jk,kl->il", a, b, c, optimize=True)
+        exp = self._matmul_ref(self._matmul_ref(a.mask, b.mask), c.mask)
+        assert np.array_equal(r.mask, exp)
+        out = np.empty((3, 5))
+        np.einsum("ij,jk->ik", a, b, out=out)
+        assert np.array_equal(out.mask, self._matmul_ref(a.mask, b.mask))
+
+    @pytest.mark.parametrize("mode", ["valid", "same", "full"])
+    def test_correlate_convolve(self, mode):
+        a, v = _hidden((7,), 40, p=0.2), _hidden((3,), 41, p=0.2)
+        for f in (np.correlate, np.convolve):
+            r = f(a, v, mode)
+            # brute force: unit-impulse probe of every input element
+            exp = np.zeros(r.shape, bool)
+            for i in np.flatnonzero(a.mask):
+                e = np.zeros(7); e[i] = 1
+                exp |= f(e, np.ones(3), mode) != 0
+            for i in np.flatnonzero(v.mask):
+                e = np.zeros(3); e[i] = 1
+                exp |= f(np.ones(7), e, mode) != 0
+            assert np.array_equal(r.mask, exp), (f.__name__, mode)
+            assert np.array_equal(_plain(r), f(_plain(a), _plain(v), mode))
+
+    def test_cross_with_masked_vectors_no_longer_raises(self):
+        # `multiply(a1, b2, out=cp0)` with 0-d masked operands and a 0-d
+        # view as `out` used to raise (mask must be an ndarray of dtype bool)
+        a, b = _hidden((3,), 42), _hidden((3,), 43)
+        assert np.array_equal(_plain(np.cross(a, b)), np.cross(_plain(a), _plain(b)))
+
+    def test_zero_d_or_of_masks_is_an_array(self):
+        a = np.array(1.0)
+        a.mask = np.array(True)
+        b = np.array(2.0)
+        b.mask = np.array(True)
+        out = np.empty(())
+        np.add(a, b, out=out)
+        assert isinstance(out.mask, np.ndarray) and out.mask.shape == () and out.mask
+        # `where`/`choose` on 0-d masked operands: no longer raise (their
+        # 0-d results decay to scalars, which carry no mask)
+        assert np.where(np.array(True), a, b) == 1.0
+        assert np.choose(np.array(0), [a, b]) == 1.0
+
+    # ---- numpy.linalg: every output depends on the whole matrix
+
+    @staticmethod
+    def _masked_at(a, *idx):
+        m = np.zeros(a.shape, bool)
+        for i in idx:
+            m[i] = True
+        a.mask = m
+        return a
+
+    @staticmethod
+    def _spd(n, seed):
+        rng = np.random.default_rng(seed)
+        x = rng.random((n, n))
+        return x @ x.T + n * np.eye(n)
+
+    def test_inv_cholesky_pinv_hide_the_whole_matrix(self):
+        a = self._masked_at(self._spd(3, 50), (0, 1))
+        for f in (np.linalg.inv, np.linalg.cholesky, np.linalg.pinv):
+            r = f(a)
+            assert r.mask.shape == (3, 3) and r.mask.all(), f.__name__
+            assert np.array_equal(_plain(r), f(_plain(a))), f.__name__
+
+    def test_stacked_matrices_are_independent(self):
+        s = self._masked_at(
+            np.stack([self._spd(3, 51), self._spd(3, 52), self._spd(3, 53)]),
+            (1, 2, 0))
+        r = np.linalg.inv(s)
+        assert r.mask[1].all() and not r.mask[0].any() and not r.mask[2].any()
+        d = np.linalg.det(s)
+        assert np.array_equal(d.mask, [False, True, False])
+        assert np.array_equal(np.linalg.eigvalsh(s).mask,
+                              np.array([[False] * 3, [True] * 3, [False] * 3]))
+
+    def test_eigh_svd_qr(self):
+        a = self._masked_at(self._spd(3, 54), (2, 1))
+        w, v = np.linalg.eigh(a)
+        assert w.mask.shape == (3,) and w.mask.all() and v.mask.all()
+        u, s, vh = np.linalg.svd(a)
+        assert u.mask.all() and s.mask.all() and vh.mask.all()
+        q, r = np.linalg.qr(a)
+        assert q.mask.all()
+        # R's strictly lower triangle is structurally zero: only the upper
+        # triangle depends on (and hides) the data
+        assert np.array_equal(r.mask, np.triu(np.ones((3, 3), bool)))
+        assert np.array_equal(np.linalg.qr(a, mode="r").mask, r.mask)
+
+    def test_solve_hides_by_column_of_b(self):
+        a = self._spd(3, 55)
+        b = self._masked_at(np.arange(1., 7.).reshape(3, 2), (0, 1))
+        x = np.linalg.solve(a, b)
+        assert np.array_equal(x.mask, np.broadcast_to([False, True], (3, 2)))
+        # a hidden element of `a` hides every column
+        self._masked_at(a, (1, 1))
+        assert np.linalg.solve(a, np.ones((3, 2))).mask.all()
+        assert np.linalg.solve(a, np.ones(3)).mask.all()
+
+    def test_lstsq_and_matrix_power_and_multi_dot(self):
+        a, b = _hidden((4, 3), 56, p=0.1), np.arange(4.)
+        x, res, rank, sv = np.linalg.lstsq(a, b, rcond=None)
+        assert x.mask.all() and sv.mask.all()
+        sq = _hidden((3, 3), 57, p=0.1)
+        assert np.array_equal(np.linalg.matrix_power(sq, 2).mask,
+                              self._matmul_ref(sq.mask, sq.mask))
+        c = _hidden((3, 4), 58, p=0.1)
+        exp = self._matmul_ref(self._matmul_ref(sq.mask, c.mask),
+                               np.zeros((4, 2), bool))
+        assert np.array_equal(np.linalg.multi_dot([sq, c, np.ones((4, 2))]).mask, exp)
+
+    def test_scalar_results_carry_no_mask(self):
+        a = self._masked_at(self._spd(3, 59), (0, 0))
+        # documented convention: a 0-d/scalar result cannot carry a mask
+        assert not hasattr(np.linalg.det(a), "mask")
+        assert not hasattr(np.trace(a), "mask")
+        assert not hasattr(np.linalg.norm(a), "mask")
+
+    def test_unmasked_linalg_untouched(self):
+        a = self._spd(3, 60)
+        assert np.linalg.inv(a).mask is None
+        assert all(x.mask is None for x in np.linalg.svd(a))
+
+    def test_gufunc_out_mask_is_cleared_by_unmasked_inputs(self):
+        a = self._spd(3, 61)
+        out = np.empty((3, 3))
+        out.mask = np.ones((3, 3), bool)
+        np.matmul(a, a, out=out)
+        assert out.mask is None
+
+    def test_gufunc_with_subclass_mask_attribute_is_left_alone(self):
+        class Sub(np.ndarray):
+            mask = "unrelated"
+        a = np.eye(3).view(Sub)
+        assert (a @ a).mask == "unrelated"
