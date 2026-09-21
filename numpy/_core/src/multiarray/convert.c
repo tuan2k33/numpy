@@ -756,6 +756,11 @@ PyArray_View(PyArrayObject *self, PyArray_Descr *type, PyTypeObject *pytype)
     }
 
     if (PyArray_MASK(self) != NULL) {
+        if (PyArray_EquivTypes(type, dtype)) {
+            /* `a.view(a.dtype)`: not a dtype change, same as `a.view()` */
+            Py_DECREF(type);
+            return PyArray_View(self, NULL, pytype);
+        }
         PyErr_SetString(PyExc_ValueError,
                 "dtype-changing views are unsupported for masked arrays. "
                 "Use astype() if a dtype conversion is required while "

@@ -397,7 +397,8 @@ PyArray_CastToType(PyArrayObject *arr, PyArray_Descr *dtype, int is_f_order)
         return NULL;
     }
 
-    if (PyArray_CopyInto((PyArrayObject *)out, arr) < 0) {
+    if (PyArray_CopyInto((PyArrayObject *)out, arr) < 0 ||
+            PyArray_CopyMaskFrom((PyArrayObject *)out, arr) < 0) {
         Py_DECREF(out);
         return NULL;
     }

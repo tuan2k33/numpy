@@ -35,6 +35,19 @@ NPY_NO_EXPORT int
 PyArray_SetMaskObject(PyArrayObject *arr, PyObject *obj);
 
 /*
+ * Mask transport helpers for ops that produce a new array of the *same
+ * shape* as `src`: no-ops when `src` is unmasked. `CopyMaskFrom` attaches an
+ * independent copy of `src`'s mask to `dst` (for ops that copy the data),
+ * `ViewMaskFrom` attaches a view sharing `src`'s mask buffer (for ops that
+ * view the data). Return 0 on success, -1 with an exception set on failure.
+ */
+NPY_NO_EXPORT int
+PyArray_CopyMaskFrom(PyArrayObject *dst, PyArrayObject *src);
+
+NPY_NO_EXPORT int
+PyArray_ViewMaskFrom(PyArrayObject *dst, PyArrayObject *src);
+
+/*
  * This flag is used to mark arrays which we would like to, in the future,
  * turn into views. It causes a warning to be issued on the first attempt to
  * write to the array (but the write is allowed to succeed).

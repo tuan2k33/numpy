@@ -1961,7 +1961,7 @@ PyArray_FromArray(PyArrayObject *arr, PyArray_Descr *newtype, int flags)
         ((PyArrayObject_fields *)ret)->nd = actual_ndim;
         ((PyArrayObject_fields *)ret)->descr = actual_dtype;
 
-        if (success < 0) {
+        if (success < 0 || PyArray_CopyMaskFrom(ret, arr) < 0) {
             Py_DECREF(ret);
             return NULL;
         }

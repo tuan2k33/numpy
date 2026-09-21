@@ -344,6 +344,36 @@ PyArray_SetMaskObject(PyArrayObject *arr, PyObject *obj)
 }
 
 
+NPY_NO_EXPORT int
+PyArray_CopyMaskFrom(PyArrayObject *dst, PyArrayObject *src)
+{
+    if (PyArray_MASK(src) == NULL) {
+        return 0;
+    }
+    PyObject *mask = PyArray_NewCopy(
+            (PyArrayObject *)PyArray_MASK(src), NPY_KEEPORDER);
+    if (mask == NULL) {
+        return -1;
+    }
+    return PyArray_SetMaskObject(dst, mask);
+}
+
+
+NPY_NO_EXPORT int
+PyArray_ViewMaskFrom(PyArrayObject *dst, PyArrayObject *src)
+{
+    if (PyArray_MASK(src) == NULL) {
+        return 0;
+    }
+    PyObject *mask = PyArray_View(
+            (PyArrayObject *)PyArray_MASK(src), NULL, &PyArray_Type);
+    if (mask == NULL) {
+        return -1;
+    }
+    return PyArray_SetMaskObject(dst, mask);
+}
+
+
 /**
  * Assign an arbitrary object a NumPy array. This is largely basically
  * identical to PyArray_FromAny, but assigns directly to the output array.

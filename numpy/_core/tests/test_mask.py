@@ -658,8 +658,8 @@ class TestMaskReduceLike:
 class TestMaskCoreTransport:
     """Phase 5: transpose-family and broadcast mask propagation."""
 
-    def _masked_2d(self):
-        a = np.arange(6).reshape(2, 3)
+    def _masked_2d(self, dtype=np.intp):
+        a = np.arange(6, dtype=dtype).reshape(2, 3)
         a.mask = np.array([[False, True, False], [True, False, False]])
         return a
 
@@ -689,13 +689,79 @@ class TestMaskCoreTransport:
         a = self._masked_2d()
         result = a.view(a.dtype)
         assert np.array_equal(result.mask, a.mask)
+        assert np.shares_memory(result.mask, a.mask)
+
+    def test_unmasked_dtype_view_unchanged(self):
+        a = np.arange(4, dtype=np.int32)
+        assert a.view(np.float32).mask is None
+
+    def test_astype_copies_mask(self):
+        a = self._masked_2d()
+        result = a.astype(np.float64)
+        assert result.dtype == np.float64
+        assert np.array_equal(result.mask, a.mask)
+        assert not np.shares_memory(result.mask, a.mask)
+        result.mask[0, 0] = True
+        assert not a.mask[0, 0]
+
+    def test_astype_keeps_mask_for_orders_and_no_copy(self):
+        a = self._masked_2d()
+        assert np.array_equal(a.astype(np.int32, order='F').mask, a.mask)
+        assert np.array_equal(a.T.astype(np.int32).mask, a.mask.T)
+        # No-op astype returns self, mask untouched.
+        assert a.astype(a.dtype, copy=False) is a
+        assert a.astype(a.dtype, copy=False).mask is a.mask
+
+    def test_astype_unmasked_stays_unmasked(self):
+        assert np.arange(4).astype(float).mask is None
+
+    def test_dtype_conversion_constructors_keep_mask(self):
+        a = self._masked_2d()
+        assert np.array_equal(np.asarray(a, dtype=np.float32).mask, a.mask)
+        assert np.array_equal(np.array(a, dtype=np.float32).mask, a.mask)
+
+    def test_flatten_copies_mask(self):
+        a = self._masked_2d()
+        for order in "CFA":
+            result = a.flatten(order)
+            assert np.array_equal(result.mask, a.mask.flatten(order))
+            assert not np.shares_memory(result.mask, a.mask)
+        assert np.arange(3).flatten().mask is None
+
+    def test_diagonal_propagates_mask(self):
+        def full(arr):  # all-False canonicalizes to None
+            return np.zeros(arr.shape, bool) if arr.mask is None else arr.mask
+
+        a = np.arange(12).reshape(3, 4)
+        a.mask = (a % 5 == 0)
+        for offset in (-2, -1, 0, 1, 3):
+            assert np.array_equal(full(a.diagonal(offset)),
+                                  a.mask.diagonal(offset))
+        assert np.array_equal(a.diagonal(0).mask, [True, True, True])
+        b = np.arange(24).reshape(2, 3, 4)
+        b.mask = (b % 3 == 0)
+        assert np.array_equal(b.diagonal(-1, 2, 1).mask,
+                              b.mask.diagonal(-1, 2, 1))
+        assert np.arange(9).reshape(3, 3).diagonal().mask is None
+
+    def test_real_imag_views_share_mask(self):
+        a = self._masked_2d(np.complex128)
+        for part in (a.real, a.imag):
+            assert np.array_equal(part.mask, a.mask)
+            assert np.shares_memory(part.mask, a.mask)
+
+    def test_imag_of_real_array_keeps_mask(self):
+        a = self._masked_2d(np.float64)
+        assert np.array_equal(a.imag.mask, a.mask)
+        assert np.array_equal(a.real.mask, a.mask)
 
     def test_dtype_changing_view_is_rejected(self):
-        a = self._masked_2d().astype(np.int32)
+        a = self._masked_2d(np.int32)
         with pytest.raises(ValueError, match="dtype-changing views are unsupported"):
             a.view(np.float32)
 
     def test_topology_changing_dtype_view_is_rejected(self):
-        a = self._masked_2d().astype(np.int64)
-        with pytest.raises(ValueError, match="Use astype\(\)"):
+        a = self._masked_2d(np.int64)
+        with pytest.raises(ValueError, match=r"Use astype\(\)"):
             a.view(np.int32)
+

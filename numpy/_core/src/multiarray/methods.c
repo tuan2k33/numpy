@@ -890,7 +890,7 @@ array_astype(PyArrayObject *self,
     ((PyArrayObject_fields *)ret)->nd = out_ndim;
     ((PyArrayObject_fields *)ret)->descr = out_descr;
 
-    if (success < 0) {
+    if (success < 0 || PyArray_CopyMaskFrom(ret, self) < 0) {
         Py_DECREF(ret);
         return NULL;
     }
@@ -2712,7 +2712,18 @@ array_flatten(PyArrayObject *self,
             {"|order", PyArray_OrderConverter, &order}) < 0) {
         return NULL;
     }
-    return PyArray_Flatten(self, order);
+    PyObject *flat = PyArray_Flatten(self, order);
+    if (flat != NULL && PyArray_MASK(self) != NULL) {
+        /* Flatten the mask with the identical element permutation. */
+        PyObject *mask_flat = PyArray_Flatten(
+                (PyArrayObject *)PyArray_MASK(self), order);
+        if (mask_flat == NULL ||
+                PyArray_SetMaskObject((PyArrayObject *)flat, mask_flat) < 0) {
+            Py_DECREF(flat);
+            return NULL;
+        }
+    }
+    return flat;
 }
 
 

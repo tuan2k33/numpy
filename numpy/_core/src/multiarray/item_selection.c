@@ -2447,6 +2447,7 @@ PyArray_Diagonal(PyArrayObject *self, int offset, int axis1, int axis2)
     stride2 = strides[axis2];
 
     /* Compute the data pointers and diag_size for the view */
+    const int orig_offset = offset;  /* `offset` is negated below */
     data = PyArray_DATA(self);
     if (offset >= 0) {
         offset_stride = stride2;
@@ -2493,6 +2494,17 @@ PyArray_Diagonal(PyArrayObject *self, int offset, int axis1, int axis2)
      * This line needs to be removed in 1.10.
      */
     PyArray_CLEARFLAGS((PyArrayObject *)ret, NPY_ARRAY_WRITEABLE);
+
+    if (PyArray_MASK(self) != NULL) {
+        /* Same offset/axes on the mask (already normalized above). */
+        PyObject *mask_diag = PyArray_Diagonal(
+                (PyArrayObject *)PyArray_MASK(self), orig_offset, axis1, axis2);
+        if (mask_diag == NULL ||
+                PyArray_SetMaskObject((PyArrayObject *)ret, mask_diag) < 0) {
+            Py_DECREF(ret);
+            return NULL;
+        }
+    }
 
     return ret;
 }

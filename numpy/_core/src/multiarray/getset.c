@@ -534,6 +534,11 @@ _get_part(PyArrayObject *self, PyObject *ufunc, PyBoundArrayMethodObject *meth, 
             PyArray_STRIDES(self), PyArray_BYTES(self) + view_offset,
             PyArray_FLAGS(self), (PyObject *)self, (PyObject *)self,
             _NPY_ARRAY_ENSURE_DTYPE_IDENTITY);
+        /* The part is a view of the data, so it shares the mask too. */
+        if (ret != NULL &&
+                PyArray_ViewMaskFrom((PyArrayObject *)ret, self) < 0) {
+            Py_CLEAR(ret);
+        }
     }
     else if (!need_view) {
         // resolve_descriptors was successful, but view_offset is not set so we call
@@ -621,6 +626,10 @@ array_imag_get(PyArrayObject *self, void *NPY_UNUSED(ignored))
             return NULL;
         }
         PyArray_CLEARFLAGS((PyArrayObject *)ret, NPY_ARRAY_WRITEABLE);
+        if (PyArray_CopyMaskFrom((PyArrayObject *)ret, self) < 0) {
+            Py_DECREF(ret);
+            return NULL;
+        }
         return ret;
     }
 

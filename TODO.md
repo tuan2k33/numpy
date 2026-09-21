@@ -29,7 +29,7 @@ Current focus:
 
 - **Phase 6:** implement advanced/fancy and boolean indexing.
 - **Phase 7:** implement gather, scatter, and combine/split operations.
-- Phase 5 is complete; keep the cross-test, design review, NEP review, and
+- Phase 5 is complete (incl. `astype`/`flatten`/`diagonal`/`real`/`imag`); keep the cross-test, design review, NEP review, and
   plain-array baseline as the gate for every change.
 
 - **Phase 0 — baseline (no code changes)**
@@ -48,9 +48,17 @@ Current focus:
 - **Phase 4 — reductions and `where=` merge fix**
   - Combined: 14916 passed, 17 skipped, 12 deselected.
   - Match with the previous row: ✅ identical.
-- **Phase 5 — transpose and broadcast mask transport**
-  - Related suites: 15380 passed, 17 skipped, 12 deselected.
-  - Includes `test_shape_base.py`, `test_stride_tricks.py`, and mask tests.
+- **Phase 5 — transpose, broadcast, view and dtype-cast mask transport**
+  - `test_multiarray.py` + `test_indexing.py` (`-m "not slow"`): 14932
+    passed, 17 skipped, 12 deselected, 0 failed. The count is 16 higher than
+    the rows above with test files byte-identical to the phase-0 base; it is
+    a collection difference in this environment (not from a code change, no
+    new skips/failures) — re-baseline against it from here on.
+  - Plus `test_umath.py`, `test_ufunc.py`, `test_shape_base.py`,
+    `numpy/lib/tests/test_stride_tricks.py`: 20931 passed, 77 skipped,
+    12 deselected, 7 xfailed (pre-existing xfails), 0 failed.
+  - `test_mask.py`: all phase-5 tests pass (the phase-6 WIP tests in the same
+    file are excluded from this gate).
   - Match with the plain-array baseline: ✅ no regression.
 
 Add one row per phase from here on, run against the same two files at
@@ -406,10 +414,39 @@ tests from scratch.
     </details>
 
 - [x] **5 — Core transport completion** (follow-up to phase 2)
-  - [x] `multiarray/getset.c` (`.T`, transpose, and axis operations)
-  - [x] `numpy/lib/_stride_tricks_impl.py` (`broadcast_to`)
-      - [x] Dtype-changing `.view()` on a masked array raises a clear error;
-        use `astype()` when preserving mask semantics through conversion.
+  - [x] `multiarray/shape.c` `PyArray_Transpose` (covers `.T`, `.mT`,
+        `transpose`, `swapaxes`, `moveaxis`/`rollaxis`, `matrix_transpose`):
+        the identical permutation is applied to the mask (a view).
+  - [x] `numpy/lib/_stride_tricks_impl.py` (`broadcast_to`; also reached by
+        `broadcast_arrays`): mask is `broadcast_to`'d too (read-only view).
+  - [x] `.view()`: same-dtype views (including an explicit
+        `a.view(a.dtype)`) share the mask; dtype-changing `.view()` on a
+        masked array raises a clear error pointing at `astype()`. Unmasked
+        arrays keep NumPy's normal dtype-view behavior.
+  - [x] Pulled forward from phase 8 because phase 5's own error message
+        sends users to `astype()`, and a workaround that silently drops the
+        mask would be a redaction leak: shared helpers
+        `PyArray_CopyMaskFrom`/`PyArray_ViewMaskFrom` (`arrayobject.c`) are
+        used by `astype` (`methods.c`), `PyArray_CastToType`
+        (`convert_datatype.c`) and `PyArray_FromArray`'s copy-and-cast path
+        (`ctors.c`, i.e. `np.array/asarray(a, dtype=...)`). The mask is
+        copied, not shared, exactly like the data. A no-op `astype` returns
+        `self` (mask untouched).
+  - [x] Same-class gaps found while re-auditing phase 5 (they were silently
+        dropping the mask): `.flatten()` (`methods.c`, a copy: mask
+        flattened with the same order), `.diagonal()` (`item_selection.c`,
+        a view: same offset/axes on the mask), `.real`/`.imag` of complex
+        arrays (`getset.c` `_get_part`, view: shares the mask) and `.imag`
+        of a non-complex array (zeros with a copied mask).
+  - [x] Tests: `TestMaskCoreTransport` in `test_mask.py`. Leak check (RSS +
+        refcount, 30000 iterations each, error paths included): flat.
+  - **Still dropping the mask after phase 5 (not phase 5's scope, decided
+    per case):**
+    - `.flat[...]` / `flatiter.copy()` (`iterators.c`) -> phase 6 (indexing).
+    - `np.lib.stride_tricks.as_strided` / `sliding_window_view`: they build a
+      new array from raw strides via `__array_interface__`, so there is no
+      principled mask transform. Currently drops silently; needs a decision
+      (raise for masked input, or document as convention).
 - [ ] **6 — Indexing**
   - [ ] `multiarray/mapping.c` — basic indexing already covered in phase 2;
         advanced/fancy + boolean indexing (copy — build new mask
@@ -421,8 +458,12 @@ tests from scratch.
   - [ ] `multiarray/multiarraymodule.c` (`concatenate`, split/stack APIs)
 - [ ] **8 — Casting**
   - [ ] `multiarray/convert_datatype.c`, `multiarray/convert.c`
-  - [ ] Cover `astype`, dtype conversion, and related casting APIs before
-        implementing linear algebra.
+  - [ ] `astype`, `PyArray_CastToType` and `np.array/asarray(dtype=...)`
+        already carry the mask (done in phase 5). Remaining: audit the other
+        casting entry points (`can_cast`/`result_type` are mask-blind by
+        design; `view` on structured/subarray dtypes; `astype` to a subarray
+        dtype currently raises a shape-mismatch error instead of guessing)
+        before implementing linear algebra.
 - [ ] **9 — Linear algebra**
   - [ ] Decide whether masked `matmul`/LAPACK input is rejected, ignored, or
         propagated before changing the implementation.
