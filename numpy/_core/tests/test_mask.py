@@ -706,7 +706,9 @@ class TestMaskCoreTransport:
 
     def test_astype_keeps_mask_for_orders_and_no_copy(self):
         a = self._masked_2d()
-        assert np.array_equal(a.astype(np.int32, order='F').mask, a.mask)
+        f = a.astype(np.int32, order='F')
+        assert np.array_equal(f.mask, a.mask)
+        assert f.flags.f_contiguous and f.mask.flags.f_contiguous
         assert np.array_equal(a.T.astype(np.int32).mask, a.mask.T)
         # No-op astype returns self, mask untouched.
         assert a.astype(a.dtype, copy=False) is a
@@ -743,6 +745,55 @@ class TestMaskCoreTransport:
         assert np.array_equal(b.diagonal(-1, 2, 1).mask,
                               b.mask.diagonal(-1, 2, 1))
         assert np.arange(9).reshape(3, 3).diagonal().mask is None
+
+    def test_as_strided_carries_mask(self):
+        from numpy.lib.stride_tricks import as_strided
+        a = self._masked_2d()
+        # Default strides, and explicit byte strides (transposed / windowed).
+        assert np.array_equal(as_strided(a, a.shape).mask, a.mask)
+        result = as_strided(a, shape=(3, 2), strides=(8, 24))
+        assert np.array_equal(result.mask, a.mask.T)
+        result = as_strided(a, shape=(2, 2, 2), strides=(24, 8, 8))
+        assert np.array_equal(result.mask[0, 0], a.mask[0, :2])
+        assert np.array_equal(result.mask[0, 1], a.mask[0, 1:])
+        # The mask buffer is shared like the data buffer is.
+        assert np.shares_memory(result.mask, a.mask)
+
+    def test_as_strided_masked_fortran_and_sliced(self):
+        from numpy.lib.stride_tricks import as_strided
+        a = np.asfortranarray(self._masked_2d())
+        assert a.mask.flags.f_contiguous  # copy keeps mask layout like data
+        result = as_strided(a, a.shape, a.strides)
+        assert np.array_equal(result.mask, a.mask)
+        b = self._masked_2d()[:, ::2]
+        result = as_strided(b, b.shape, b.strides)
+        assert np.array_equal(result.mask, b.mask)
+
+    def test_as_strided_without_mapping_drops_mask(self):
+        from numpy.lib.stride_tricks import as_strided
+        a = self._masked_2d()
+        # Stride not a whole number of elements: no mask mapping (fail-open).
+        assert as_strided(a, shape=(3,), strides=(4,)).mask is None
+        # Mask layout not proportional to the data layout: fail-open too.
+        a.mask = np.asfortranarray(a.mask)
+        assert as_strided(a, a.shape, a.strides).mask is None
+
+    def test_as_strided_unmasked_stays_unmasked(self):
+        from numpy.lib.stride_tricks import as_strided
+        b = np.arange(6)
+        assert as_strided(b, (3,), (16,)).mask is None
+
+    def test_sliding_window_view_carries_mask(self):
+        from numpy.lib.stride_tricks import sliding_window_view
+        a = np.arange(10)
+        a.mask = (a % 4 == 3)
+        result = sliding_window_view(a, 3)
+        assert result.shape == (8, 3)
+        assert np.array_equal(result.mask, sliding_window_view(a.mask, 3))
+        b = self._masked_2d()
+        result = sliding_window_view(b, 2, axis=1)
+        assert np.array_equal(result.mask,
+                              sliding_window_view(b.mask, 2, axis=1))
 
     def test_real_imag_views_share_mask(self):
         a = self._masked_2d(np.complex128)

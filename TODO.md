@@ -451,13 +451,17 @@ tests from scratch.
         of a non-complex array (zeros with a copied mask).
   - [x] Tests: `TestMaskCoreTransport` in `test_mask.py`. Leak check (RSS +
         refcount, 30000 iterations each, error paths included): flat.
-  - **Still dropping the mask after phase 5 (not phase 5's scope, decided
-    per case):**
-    - `.flat[...]` / `flatiter.copy()` (`iterators.c`) -> phase 6 (indexing).
-    - `np.lib.stride_tricks.as_strided` / `sliding_window_view`: they build a
-      new array from raw strides via `__array_interface__`, so there is no
-      principled mask transform. Currently drops silently; needs a decision
-      (raise for masked input, or document as convention).
+  - [x] `as_strided` (`numpy/lib/_stride_tricks_impl.py`): carries the mask
+        by re-running `as_strided` on the mask with the byte strides divided
+        by `itemsize`. Valid only when every view stride is a whole number of
+        elements and the mask layout is proportional to the data layout;
+        otherwise fail-open (see "Known limitations"). `sliding_window_view`
+        calls `as_strided`, so it inherits this. `PyArray_CopyMaskFrom` lays
+        the copied mask out like the destination data (same stride order) so
+        the proportional case is the common one (`astype(order='F')`,
+        `asfortranarray`, ...).
+  - Remaining mask drops after phase 5 are tracked under "Known limitations
+    (fail-open)" at the bottom of this file.
 - [ ] **6 — Indexing**
   - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
         merged, `HEAD..origin/main` is 0.
@@ -503,6 +507,22 @@ after each implementation step, rerun the relevant regression checks and the
 plain-array baseline to confirm no masked-path or no-mask regression.
 
 ## Note / known limitation
+
+### Known limitations (fail-open) — check before closing phase 10
+
+Policy (see `DESIGN.md`): an operation without mask support behaves exactly
+like it does for a plain array — the mask is dropped, nothing raises. This is
+deliberate: the priority is that every op keeps working with no wrong result
+or regression. Every such gap must be listed here so it can be audited later.
+
+| Operation | What happens | Planned |
+|---|---|---|
+| `.flat[...]`, `.flat[i] = v`, `flatiter.copy()` (`iterators.c`) | mask dropped | phase 6 |
+| `as_strided`/`sliding_window_view` with a stride that is not a whole number of elements, or a mask layout not proportional to the data | mask dropped | revisit (could conform the mask copy to the data layout) |
+| `astype` to a subarray dtype | raises a shape-mismatch `ValueError` (shape changes) | phase 8 |
+| 0-d/scalar results (`np.add.reduce(x)`, `x[0]`, ...) | mask dropped (scalars cannot carry one) | decide in phase 10 |
+| where= with `out=None` or multi-output ufuncs | mask propagation skipped | revisit |
+| gufuncs (`matmul`, `linalg`) | mask dropped | phase 9 |
 
 <details>
 <summary>Performance backlog (not an active phase)</summary>

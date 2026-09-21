@@ -36,6 +36,32 @@ def _maybe_view_as_subclass(original_array, new_array):
 
 
 @set_module("numpy.lib.stride_tricks")
+def _as_strided_carry_mask(base, view, writeable):
+    """Attach a mask to the raw-strided `view` of a masked `base`.
+
+    `as_strided` strides are byte offsets into the data buffer, but the mask
+    is a separate bool buffer. Byte offset ``o`` in the data maps to offset
+    ``o // itemsize`` in the mask when (a) the mask's layout is proportional
+    to the data's and (b) every view stride is a whole number of elements.
+    Otherwise there is no mapping and the mask is not carried over (fail-open,
+    see "Known limitations" in TODO.md).
+    """
+    mask = base.mask
+    itemsize = base.itemsize
+    if itemsize == 0:
+        return
+    for size, dstride, mstride in zip(base.shape, base.strides, mask.strides):
+        if size > 1 and dstride != mstride * itemsize:
+            return
+    for size, stride in zip(view.shape, view.strides):
+        if size > 1 and stride % itemsize != 0:
+            return
+    view.mask = as_strided(
+        mask, shape=view.shape,
+        strides=tuple(stride // itemsize for stride in view.strides),
+        writeable=writeable)
+
+
 def as_strided(
     x, shape=None, strides=None, subok=False, writeable=True, *, check_bounds=None
 ):
@@ -146,6 +172,9 @@ def as_strided(
 
     if view.flags.writeable and not writeable:
         view.flags.writeable = False
+
+    if base.mask is not None:
+        _as_strided_carry_mask(base, view, writeable)
 
     if check_bounds:
         while isinstance(base.base, np.ndarray):

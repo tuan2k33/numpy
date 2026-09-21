@@ -122,6 +122,19 @@ interfere with each other.
   dtype conversion is required while preserving mask semantics. Unmasked
   arrays retain NumPy's normal dtype-view behavior.
 
+## Fail-open policy for unsupported operations
+
+While the feature is being built, an operation that has no mask support yet
+behaves exactly like it does for a plain array: the result carries no mask
+and nothing raises. This is deliberate — the first priority is that every
+operation keeps working with no wrong result and no plain-array regression;
+fail-closed (raising) would break internal NumPy code paths that copy or
+view arrays. Every such gap is recorded in TODO.md under "Known limitations
+(fail-open)" and must be audited before the work is considered complete.
+Operations that do support masks must never silently produce a *wrong* mask —
+dropping is allowed, mis-mapping is not (e.g. `as_strided` only carries the
+mask when the byte strides map onto whole mask elements).
+
 ## Unmasked representation
 
 - A newly created ordinary ndarray has `mask == NULL`.

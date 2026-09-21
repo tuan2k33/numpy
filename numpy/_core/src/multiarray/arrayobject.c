@@ -350,12 +350,32 @@ PyArray_CopyMaskFrom(PyArrayObject *dst, PyArrayObject *src)
     if (PyArray_MASK(src) == NULL) {
         return 0;
     }
-    PyObject *mask = PyArray_NewCopy(
-            (PyArrayObject *)PyArray_MASK(src), NPY_KEEPORDER);
+    if (PyArray_NDIM(dst) != PyArray_NDIM(src) ||
+            !PyArray_CompareLists(PyArray_DIMS(dst), PyArray_DIMS(src),
+                                  PyArray_NDIM(src))) {
+        PyErr_SetString(PyExc_ValueError,
+                "cannot carry the mask over: the result's shape differs "
+                "from the masked input's shape");
+        return -1;
+    }
+    /*
+     * Lay the mask out like `dst`'s data (same stride ordering), not like
+     * the source mask, so the mask stays proportional to the data buffer.
+     */
+    PyArray_Descr *bool_descr = PyArray_DescrFromType(NPY_BOOL);
+    if (bool_descr == NULL) {
+        return -1;
+    }
+    PyArrayObject *mask = (PyArrayObject *)PyArray_NewLikeArray(
+            dst, NPY_KEEPORDER, bool_descr, 0);
     if (mask == NULL) {
         return -1;
     }
-    return PyArray_SetMaskObject(dst, mask);
+    if (PyArray_CopyInto(mask, (PyArrayObject *)PyArray_MASK(src)) < 0) {
+        Py_DECREF(mask);
+        return -1;
+    }
+    return PyArray_SetMaskObject(dst, (PyObject *)mask);
 }
 
 
