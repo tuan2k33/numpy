@@ -426,7 +426,8 @@ _infer_descr_from_dtype(PyArray_DTypeMeta *dtype) {
  */
 NPY_NO_EXPORT int
 PyArray_AssignFromCache_Recursive(
-        PyArrayObject *self, const int ndim, coercion_cache_obj **cache)
+        PyArrayObject *self, PyArrayObject *mask, const int ndim,
+        coercion_cache_obj **cache)
 {
     int ret = -1;
     /* Consume first cache element by extracting information and freeing it */
@@ -448,6 +449,11 @@ PyArray_AssignFromCache_Recursive(
         /* Straight forward array assignment */
         assert(PyArray_Check(obj));
         if (PyArray_CopyInto(self, (PyArrayObject *)obj) < 0) {
+            goto finish;
+        }
+        if (mask != NULL && PyArray_MASK((PyArrayObject *)obj) != NULL &&
+                PyArray_CopyInto(
+                    mask, (PyArrayObject *)PyArray_MASK((PyArrayObject *)obj)) < 0) {
             goto finish;
         }
     }
@@ -497,11 +503,21 @@ PyArray_AssignFromCache_Recursive(
                 if (view == NULL) {
                     goto finish_critical_section;
                 }
-                if (PyArray_AssignFromCache_Recursive(view, ndim, cache) < 0) {
-                    Py_DECREF(view);
+                PyArrayObject *mask_view = NULL;
+                if (mask != NULL) {
+                    mask_view = (PyArrayObject *)array_item_asarray(mask, i);
+                    if (mask_view == NULL) {
+                        Py_DECREF(view);
+                        goto finish_critical_section;
+                    }
+                }
+                int res = PyArray_AssignFromCache_Recursive(
+                        view, mask_view, ndim, cache);
+                Py_XDECREF(mask_view);
+                Py_DECREF(view);
+                if (res < 0) {
                     goto finish_critical_section;
                 }
-                Py_DECREF(view);
             }
         }
     err = 0;
@@ -532,8 +548,9 @@ PyArray_AssignFromCache_Recursive(
  *        should be handled by `PyArray_FromArray()` before.
  * @return 0 on success -1 on failure.
  */
-NPY_NO_EXPORT int
-PyArray_AssignFromCache(PyArrayObject *self, coercion_cache_obj *cache) {
+static int
+_assign_from_cache_masked(PyArrayObject *self, PyArrayObject *mask,
+                          coercion_cache_obj *cache) {
     int ndim = PyArray_NDIM(self);
     /*
      * Do not support ndim == 0 now with an array in the cache.
@@ -545,7 +562,7 @@ PyArray_AssignFromCache(PyArrayObject *self, coercion_cache_obj *cache) {
     assert(cache->sequence);
     assert(ndim != 0);  /* guaranteed if cache contains a sequence */
 
-    if (PyArray_AssignFromCache_Recursive(self, ndim, &cache) < 0) {
+    if (PyArray_AssignFromCache_Recursive(self, mask, ndim, &cache) < 0) {
         /* free the remaining cache. */
         npy_free_coercion_cache(cache);
         return -1;
@@ -564,6 +581,11 @@ PyArray_AssignFromCache(PyArrayObject *self, coercion_cache_obj *cache) {
         return -1;
     }
     return 0;
+}
+
+NPY_NO_EXPORT int
+PyArray_AssignFromCache(PyArrayObject *self, coercion_cache_obj *cache) {
+    return _assign_from_cache_masked(self, NULL, cache);
 }
 
 
@@ -1699,10 +1721,41 @@ PyArray_FromAny_int(PyObject *op, PyArray_Descr *in_descr,
         ((PyArrayObject_fields *)ret)->descr = dtype;
     }
 
-    int succeed = PyArray_AssignFromCache(ret, cache);
+    /*
+     * If any array in the input is masked, fill a mask alongside the data:
+     * masked leaves copy their mask into it, unmasked leaves leave it False.
+     * It is attached at the end (an all-False result stays unmasked).
+     */
+    PyArrayObject *mask = NULL;
+    if (out_ndim == ndim) {
+        for (coercion_cache_obj *c = cache; c != NULL; c = c->next) {
+            if (!c->sequence &&
+                    PyArray_MASK((PyArrayObject *)c->arr_or_sequence) != NULL) {
+                mask = (PyArrayObject *)PyArray_ZEROS(
+                        ndim, PyArray_DIMS(ret), NPY_BOOL, 0);
+                if (mask == NULL) {
+                    npy_free_coercion_cache(cache);
+                    Py_CLEAR(ret);
+                    goto cleanup;
+                }
+                break;
+            }
+        }
+    }
+
+    int succeed = _assign_from_cache_masked(ret, mask, cache);
 
     ((PyArrayObject_fields *)ret)->nd = out_ndim;
     ((PyArrayObject_fields *)ret)->descr = out_descr;
+    if (mask != NULL) {
+        if (succeed < 0) {
+            Py_DECREF(mask);
+        }
+        else {
+            /* Steals the reference. */
+            succeed = PyArray_SetMaskObject(ret, (PyObject *)mask);
+        }
+    }
     if (succeed < 0) {
         Py_CLEAR(ret);
     }

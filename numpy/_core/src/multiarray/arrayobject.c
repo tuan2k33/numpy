@@ -350,9 +350,15 @@ PyArray_CopyMaskFrom(PyArrayObject *dst, PyArrayObject *src)
     if (PyArray_MASK(src) == NULL) {
         return 0;
     }
-    if (PyArray_NDIM(dst) != PyArray_NDIM(src) ||
+    /*
+     * `dst` may have extra trailing dimensions (astype to a subarray
+     * dtype appends them): every sub-element of a hidden element is hidden.
+     */
+    int src_nd = PyArray_NDIM(src);
+    int extra = PyArray_NDIM(dst) - src_nd;
+    if (extra < 0 ||
             !PyArray_CompareLists(PyArray_DIMS(dst), PyArray_DIMS(src),
-                                  PyArray_NDIM(src))) {
+                                  src_nd)) {
         PyErr_SetString(PyExc_ValueError,
                 "cannot carry the mask over: the result's shape differs "
                 "from the masked input's shape");
@@ -371,7 +377,28 @@ PyArray_CopyMaskFrom(PyArrayObject *dst, PyArrayObject *src)
     if (mask == NULL) {
         return -1;
     }
-    if (PyArray_CopyInto(mask, (PyArrayObject *)PyArray_MASK(src)) < 0) {
+    PyArrayObject *src_mask = (PyArrayObject *)PyArray_MASK(src);
+    PyArrayObject *src_view = NULL;
+    if (extra > 0) {
+        /* Broadcast the source mask over the trailing dimensions. */
+        npy_intp strides[NPY_MAXDIMS];
+        for (int i = 0; i < PyArray_NDIM(dst); i++) {
+            strides[i] = i < src_nd ? PyArray_STRIDES(src_mask)[i] : 0;
+        }
+        Py_INCREF(PyArray_DESCR(src_mask));
+        src_view = (PyArrayObject *)PyArray_NewFromDescrAndBase(
+                &PyArray_Type, PyArray_DESCR(src_mask),
+                PyArray_NDIM(dst), PyArray_DIMS(dst), strides,
+                PyArray_DATA(src_mask), 0, NULL, (PyObject *)src_mask);
+        if (src_view == NULL) {
+            Py_DECREF(mask);
+            return -1;
+        }
+        src_mask = src_view;
+    }
+    int res = PyArray_CopyInto(mask, src_mask);
+    Py_XDECREF(src_view);
+    if (res < 0) {
         Py_DECREF(mask);
         return -1;
     }

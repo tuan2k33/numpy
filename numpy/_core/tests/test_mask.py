@@ -806,15 +806,21 @@ class TestMaskCoreTransport:
         assert np.array_equal(a.imag.mask, a.mask)
         assert np.array_equal(a.real.mask, a.mask)
 
-    def test_dtype_changing_view_is_rejected(self):
+    def test_same_itemsize_dtype_view_shares_mask(self):
         a = self._masked_2d(np.int32)
-        with pytest.raises(ValueError, match="dtype-changing views are unsupported"):
-            a.view(np.float32)
+        for dt in (np.float32, np.uint32, [("x", "i4")]):
+            v = a.view(dt)
+            assert v.shape == a.shape
+            assert np.array_equal(v.mask, a.mask)
+            assert np.shares_memory(v.mask, a.mask)
 
-    def test_topology_changing_dtype_view_is_rejected(self):
-        a = self._masked_2d(np.int64)
-        with pytest.raises(ValueError, match=r"Use astype\(\)"):
-            a.view(np.int32)
+    def test_itemsize_changing_view_is_rejected(self):
+        a = self._masked_2d(np.int32)
+        for dt in (np.int64, np.int16, np.int8):
+            with pytest.raises(ValueError, match="keep the itemsize"):
+                a.view(dt)
+        # the failed views leave the original untouched
+        assert a.mask is not None and a.mask.sum() == 2
 
 
 class TestMaskIndexing:
@@ -1386,3 +1392,216 @@ class TestMaskGatherScatter:
         b = np.arange(6)
         b.resize(8, refcheck=False)
         assert b.shape == (8,)
+
+
+class TestMaskCasting:
+    """Phase 8: casting entry points beyond `astype` (done in phase 5)."""
+
+    @staticmethod
+    def _masked(dtype=np.int32, shape=(2, 3)):
+        a = np.arange(int(np.prod(shape))).reshape(shape).astype(dtype)
+        m = np.zeros(shape, dtype=bool)
+        m.flat[[1 % m.size, 3 % m.size]] = True
+        a.mask = m
+        return a
+
+    @pytest.mark.parametrize("dtype", [float, object, str, bool, complex,
+                                       [("x", "i4")]])
+    def test_astype_keeps_mask_for_every_dtype_kind(self, dtype):
+        a = self._masked()
+        r = a.astype(dtype)
+        assert np.array_equal(r.mask, a.mask)
+        assert not np.shares_memory(r.mask, a.mask)
+
+    def test_astype_to_subarray_dtype_expands_the_mask(self):
+        a = self._masked()
+        r = a.astype((np.int32, (2,)))
+        assert r.shape == a.shape + (2,)
+        # every sub-element of a hidden element is hidden
+        assert np.array_equal(r.mask, np.repeat(a.mask[..., None], 2, axis=-1))
+        assert np.array_equal(r.mask.shape, r.shape)
+        # data cast like an unmasked array
+        assert np.array_equal(np.asarray(r.view(np.ndarray)),
+                              np.arange(6).reshape(2, 3, 1).repeat(2, -1))
+
+    def test_astype_subarray_2d_subshape(self):
+        a = self._masked(shape=(4,))
+        r = a.astype((np.int32, (2, 3)))
+        assert r.mask.shape == (4, 2, 3)
+        assert np.array_equal(r.mask[..., 0, 0], a.mask)
+        assert np.array_equal(r.mask.any(axis=(1, 2)), a.mask)
+
+    def test_astype_order_variants(self):
+        a = self._masked()
+        for order in "CFAK":
+            r = a.astype(float, order=order)
+            assert np.array_equal(r.mask, a.mask)
+
+    def test_astype_failure_leaves_source_intact(self):
+        a = self._masked(np.float64)
+        with pytest.raises(TypeError):
+            a.astype(np.int8, casting="safe")
+        assert a.mask.sum() == 2
+
+    def test_asarray_family_with_dtype(self):
+        a = self._masked()
+        for f in (np.asarray, np.asanyarray, np.array, np.ascontiguousarray,
+                  np.asfortranarray):
+            r = f(a, dtype=np.float64)
+            assert np.array_equal(r.mask, a.mask), f
+        r = np.require(a, dtype=np.float64, requirements=["C"])
+        assert np.array_equal(r.mask, a.mask)
+        assert np.array_equal(np.astype(a, np.float32).mask, a.mask)
+
+    def test_asarray_same_dtype_is_identity(self):
+        a = self._masked()
+        assert np.asarray(a) is a
+
+    def test_array_ndmin_keeps_mask(self):
+        a = self._masked()
+        r = np.array(a, ndmin=4)  # copies
+        assert r.shape == (1, 1, 2, 3)
+        assert np.array_equal(r.mask, a.mask[None, None])
+        assert not np.shares_memory(r.mask, a.mask)
+        # copy=None: no copy needed, so both data and mask are views
+        r = np.array(a, ndmin=3, copy=None)
+        assert r.shape == (1, 2, 3)
+        assert np.shares_memory(r, a)
+        assert np.array_equal(r.mask, a.mask[None])
+        assert np.shares_memory(r.mask, a.mask)
+
+    def test_array_ndmin_order_f_and_1d(self):
+        a = self._masked(shape=(6,))
+        r = np.array(a, ndmin=2, order="F")
+        assert r.shape == (1, 6)
+        assert np.array_equal(r.mask, a.mask[None])
+        z = self._masked(shape=(2, 3))
+        r = np.array(z.T, ndmin=3)
+        assert np.array_equal(r.mask, z.mask.T[None])
+
+    def test_array_from_list_of_masked_arrays(self):
+        a = self._masked()
+        b = np.arange(6).reshape(2, 3)  # unmasked
+        r = np.array([a, b, a])
+        assert r.shape == (3, 2, 3)
+        expected = np.stack([a.mask, np.zeros((2, 3), bool), a.mask])
+        assert np.array_equal(r.mask, expected)
+        # data of hidden cells is still there
+        assert np.array_equal(r.view(np.ndarray)[1], b)
+
+    def test_array_from_nested_list_with_dtype(self):
+        a = self._masked(shape=(3,))
+        r = np.array([[a, a], [a, a]], dtype=np.float64)
+        assert r.shape == (2, 2, 3)
+        assert np.array_equal(r.mask, np.broadcast_to(a.mask, (2, 2, 3)))
+        assert r.dtype == np.float64
+
+    def test_array_from_list_only_unmasked_stays_unmasked(self):
+        b = np.arange(3)
+        assert np.array([b, b]).mask is None
+        assert np.array([[1, 2], [3, 4]]).mask is None
+
+    def test_array_from_list_of_all_false_masked_arrays(self):
+        a = np.arange(3)
+        a.mask = np.zeros(3, bool)  # canonicalised to no mask
+        assert np.array([a, a]).mask is None
+
+    def test_array_from_list_mixed_with_scalar_mask_free(self):
+        a = self._masked(shape=(3,))
+        r = np.array([a, a[::-1]])
+        assert np.array_equal(r.mask[1], a.mask[::-1])
+
+    def test_array_from_list_ragged_still_errors(self):
+        a = self._masked(shape=(3,))
+        with pytest.raises(ValueError):
+            np.array([a, a[:2]])
+        # and does not leak / poison a later call
+        assert np.array([a, a]).mask.shape == (2, 3)
+
+    def test_setitem_from_list_of_masked_arrays_is_a_known_limitation(self):
+        # `t[...] = [a, a]` goes through PyArray_CopyObject, which has no mask
+        # hook: the data is assigned, the masks inside the list are ignored.
+        # (`t[...] = np.array([a, a])` carries them.)
+        a = self._masked(shape=(3,))
+        t = np.zeros((2, 3))
+        t[...] = [a, a]
+        assert np.array_equal(t.view(np.ndarray), [[0, 1, 2]] * 2)
+        assert t.mask is None
+        t[...] = np.array([a, a])
+        assert np.array_equal(t.mask, np.broadcast_to(a.mask, (2, 3)))
+
+    def test_result_type_and_can_cast_are_mask_blind(self):
+        a = self._masked()
+        assert np.result_type(a, np.float64) == np.float64
+        assert np.can_cast(a, np.float64)
+        assert not np.can_cast(a.astype(np.float64), np.int8)
+
+    def test_copy_variants_keep_mask(self):
+        import copy
+        a = self._masked()
+        for r in (a.copy(), a.copy("F"), np.copy(a), copy.copy(a),
+                  copy.deepcopy(a), np.array(a, copy=True),
+                  a.__array__(copy=True)):
+            assert np.array_equal(r.mask, a.mask)
+
+    def test_scalar_conversions_carry_no_mask(self):
+        a = self._masked(shape=(1,))
+        a.mask = np.array([True])
+        assert not hasattr(float(a[0]), "mask")
+        assert not hasattr(a.item(), "mask")
+
+    def test_structured_astype_and_view_are_per_record(self):
+        s = np.zeros(3, dtype=[("a", "i4"), ("b", "f8")])
+        s.mask = np.array([True, False, False])
+        r = s.astype([("a", "i8"), ("b", "f4")])
+        assert np.array_equal(r.mask, s.mask)
+        with pytest.raises(ValueError, match="keep the itemsize"):
+            s.view(np.uint8)
+        # documented limitation: field views do not carry the record mask
+        assert s["a"].mask is None
+
+    def test_zero_d_and_empty_astype(self):
+        z = np.array(3)
+        z.mask = np.array(True)
+        assert z.astype(float).mask == True  # noqa: E712
+        e = np.zeros((0, 3))
+        e.mask = np.zeros((0, 3), bool)
+        assert e.astype(int).shape == (0, 3)
+
+
+class TestMaskSubclassNamespace:
+    """A subclass may define its own, unrelated `mask` attribute (numpy.ma)."""
+
+    def test_stride_tricks_ignore_a_subclass_mask_attribute(self):
+        class Sub(np.ndarray):
+            @property
+            def mask(self):
+                raise AssertionError("subclass mask must not be touched")
+
+            @mask.setter
+            def mask(self, value):
+                raise AssertionError("subclass mask must not be touched")
+
+        a = np.arange(6.0).reshape(2, 3).view(Sub)
+        assert np.broadcast_to(a, (4, 2, 3), subok=True).shape == (4, 2, 3)
+        assert np.lib.stride_tricks.as_strided(
+            a, shape=(2, 3), strides=a.strides, subok=True).shape == (2, 3)
+
+    def test_builtin_mask_still_carried_on_a_subclass_with_its_own_mask(self):
+        class Sub(np.ndarray):
+            mask = "unrelated"
+
+        a = np.arange(6.0).reshape(2, 3).view(Sub)
+        np.ndarray.mask.__set__(a, np.array([[True, False, False]] * 2))
+        r = np.broadcast_to(a, (2, 2, 3), subok=True)
+        assert np.array_equal(np.ndarray.mask.__get__(r),
+                              np.broadcast_to(np.ndarray.mask.__get__(a),
+                                              (2, 2, 3)))
+
+    def test_masked_array_broadcast_unchanged(self):
+        m = np.ma.masked_array([1, 2, 3], mask=[0, 1, 0], hard_mask=True)
+        r = np.broadcast_to(m, (2, 3), subok=True)
+        # exactly upstream's behaviour (np.broadcast_to never knew ma's mask)
+        assert r.mask is np.ma.nomask
+        v = np.ma.mvoid((1, 2), mask=(0, 1), dtype="i4,i4")
+        assert np.broadcast_to(v, (), subok=True) is not None

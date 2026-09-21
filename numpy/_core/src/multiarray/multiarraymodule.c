@@ -1632,6 +1632,32 @@ _prepend_ones(PyArrayObject *arr, int nd, int ndmin, NPY_ORDER order)
             Py_TYPE(arr), dtype,
             ndmin, newdims, newstrides, PyArray_DATA(arr),
             PyArray_FLAGS(arr), (PyObject *)arr, (PyObject *)arr);
+    if (ret != NULL && PyArray_MASK(arr) != NULL) {
+        /* The mask gets the same leading ones, as a view of the same mask. */
+        PyArrayObject *mask = (PyArrayObject *)PyArray_MASK(arr);
+        npy_intp mstrides[NPY_MAXDIMS];
+        npy_intp mstride = PyArray_ITEMSIZE(mask);
+        if (!(order == NPY_FORTRANORDER || PyArray_ISFORTRAN(arr) ||
+                PyArray_NDIM(arr) == 0)) {
+            mstride = PyArray_STRIDES(mask)[0] * PyArray_DIMS(mask)[0];
+        }
+        for (i = 0; i < num; i++) {
+            mstrides[i] = mstride;
+        }
+        for (i = num; i < ndmin; i++) {
+            mstrides[i] = PyArray_STRIDES(mask)[i - num];
+        }
+        Py_INCREF(PyArray_DESCR(mask));
+        PyObject *mask_view = PyArray_NewFromDescrAndBase(
+                &PyArray_Type, PyArray_DESCR(mask),
+                ndmin, newdims, mstrides, PyArray_DATA(mask),
+                PyArray_FLAGS(mask) & ~NPY_ARRAY_IS_MASK, NULL,
+                (PyObject *)mask);
+        if (mask_view == NULL ||
+                PyArray_SetMaskObject((PyArrayObject *)ret, mask_view) < 0) {
+            Py_CLEAR(ret);
+        }
+    }
     Py_DECREF(arr);
 
     return ret;

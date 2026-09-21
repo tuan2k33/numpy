@@ -2,7 +2,7 @@
 
 All timing columns are **milliseconds (ms)**, formatted `min / median`
 over 20-30 repeats (`N=2_000_000` for phase 2-3 ops, `N=500_000` for
-phase 4 ops, `N=1_000_000` for phase 6-7 ops). The last two columns are
+phase 4 ops, `N=1_000_000` for phase 6-8 ops). The last two columns are
 `fork nomask − upstream` and the mask overhead `fork mask − fork nomask`;
 both use the same ms unit. Latest measurement per op only.
 
@@ -58,3 +58,8 @@ were reran 3x for `add`/`less`/`sin`
 | 7 | `np.choose(sel, [a, b])` | 7.09 / 7.94 | 7.13 / 8.35 | 14.56 / 15.66 | +0.04 | +6.98–7.43 |
 | 7 | `a.put(idx, v)` | 0.86 / 1.20 | 1.31 / 2.55 | 1.69 / 2.39 | ~0 (noisy, flips sign) | +0.38–0.70 |
 | 7 | `np.copyto(a, b, where=cond)` | 5.04 / 5.48 | 4.77 / 4.97 | 9.80 / 10.28 | -0.27 | +4.99–5.03 |
+| 8 | `a.astype(float64)` | 0.29 / 0.50 | 0.34 / 0.65 | 0.74 / 1.09 | ~0 (noisy, flips sign) | +0.34–0.39 |
+| 8 | `np.asarray(a, dtype=float64)` | 0.30 / 0.49 | 0.37 / 0.54 | 0.81 / 1.13 | ~0 (noisy, flips sign) | +0.25–0.44 |
+| 8 | `a.view(uint32)` | ~0 | ~0 | 0.04 / 0.04 | ~0 | +0.04 |
+| 8 | `np.array(a, ndmin=3)` | 0.11 / 0.13 | 0.10 / 0.13 | 0.24 / 0.51 | ~0 | +0.12–0.14 |
+| 8 | `np.array([a, b])` | 0.74 / 1.21 | 0.60 / 0.96 | 1.22 / 1.58 | ~0 (noisy, flips sign) | +0.52–0.62 |

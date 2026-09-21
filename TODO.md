@@ -37,7 +37,8 @@ Current focus:
 
 - **Phase 6:** done (advanced/fancy and boolean indexing, assignment, `.flat`).
 - **Phase 7:** done (gather/scatter/combine, in-place mutator guards).
-- **Phase 8:** next — casting audit.
+- **Phase 8:** done (casting audit: `view(dtype)`, `np.array(ndmin=)`, `np.array([masked, ...])`, subarray `astype`).
+- **Phase 9:** next — linear algebra.
 - Phase 5 is complete (incl. `astype`/`flatten`/`diagonal`/`real`/`imag`); keep the cross-test, design review, NEP review, and
   plain-array baseline as the gate for every change.
 
@@ -94,6 +95,24 @@ Current focus:
     take/put/where/concatenate heavily): 23466 passed, 151 skipped,
     15 deselected, 7 xfailed, 0 failed.
   - `test_mask.py`: 148 passed.
+
+- **Phase 8 — casting audit (`view(dtype)`, `ndmin`, list-of-masked, subarray `astype`)**
+  - Merged upstream `a5028e8c2c` first (behind 0).
+  - `test_multiarray.py` + `test_indexing.py` (`-m "not slow"`): 14937
+    passed, 17 skipped, 0 failed — ✅ identical to phases 5–7.
+  - `test_umath.py`, `test_ufunc.py`, `test_shape_base.py`,
+    `test_stride_tricks.py`: 6016 passed, 60 skipped, 7 xfailed — ✅ identical.
+  - Widened gate (phase 7 set): 23466 passed, 151 skipped, 7 xfailed,
+    0 failed — ✅ identical.
+  - **Gate widened again to the whole suite** (`pytest numpy -m "not slow"`),
+    because `numpy/ma` and `test_public_api` were not in the earlier gate and
+    caught two phase 5 bugs (ma `.mask` collision in `_stride_tricks_impl.py`,
+    stolen `@set_module` decorator on `as_strided`): 49348+ passed, 0 failed
+    once run with `PYTHONPATH=<build-install dist-packages>` (the
+    `test_cpu_features`/`test_limited_api`/`test_cython` tests spawn
+    subprocesses that need it; without it they fail with "No module named
+    numpy", which is environment, not a regression).
+  - `test_mask.py`: 177 passed.
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
@@ -455,7 +474,8 @@ tests from scratch.
         `broadcast_arrays`): mask is `broadcast_to`'d too (read-only view).
   - [x] `.view()`: same-dtype views (including an explicit
         `a.view(a.dtype)`) share the mask; dtype-changing `.view()` on a
-        masked array raises a clear error pointing at `astype()`. Unmasked
+        masked array is refined in phase 8 (same itemsize shares the mask,
+        other itemsizes raise a clear error pointing at `astype()`). Unmasked
         arrays keep NumPy's normal dtype-view behavior.
   - [x] Pulled forward from phase 8 because phase 5's own error message
         sends users to `astype()`, and a workaround that silently drops the
@@ -582,16 +602,41 @@ tests from scratch.
         `copyto(where=)` found 0 mismatches. Leak check (RSS + refcounts of
         three live masks, 20000 iterations, 34 operations including error
         paths and `out=`): flat.
-- [ ] **8 — Casting**
-  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
-        merged, `HEAD..origin/main` is 0.
-  - [ ] `multiarray/convert_datatype.c`, `multiarray/convert.c`
-  - [ ] `astype`, `PyArray_CastToType` and `np.array/asarray(dtype=...)`
-        already carry the mask (done in phase 5). Remaining: audit the other
-        casting entry points (`can_cast`/`result_type` are mask-blind by
-        design; `view` on structured/subarray dtypes; `astype` to a subarray
-        dtype currently raises a shape-mismatch error instead of guessing)
-        before implementing linear algebra.
+- [x] **8 — Casting**
+  - [x] Sync upstream first (standing rule in Housekeeping): `origin/main`
+        merged (`a5028e8c2c`), `HEAD..origin/main` was 0 before the work.
+  - [x] Audit of every cast entry point (`probe8.py`-style sweep over
+        `astype` with float/object/str/bool/complex/structured targets and
+        `order`/`subok`/`casting`/`copy` variants, `np.array/asarray/
+        asanyarray/ascontiguousarray/asfortranarray/require/astype/copy`,
+        `__array__`, `copy.copy/deepcopy`, scalar constructors): all carried
+        the mask already (phase 5) except the four below.
+  - [x] `view(dtype)` (`convert.c`): a masked array may now be viewed as a
+        dtype of the **same itemsize** (the shape is unchanged, so the mask
+        is shared as a view, incl. structured targets); another itemsize
+        changes the last axis and still raises (`astype()` instead). Also
+        fixed a `type` reference leak on that error path.
+  - [x] `np.array(a, ndmin=n)` (`multiarraymodule.c` `_prepend_ones`): the
+        mask gets the same leading ones (a view when the data is a view).
+  - [x] `np.array([a, b, ...])`, nested lists/tuples, with/without `dtype=`
+        (`ctors.c`, `PyArray_FromAny` sequence path): if any leaf array is
+        masked, a mask is filled alongside the data
+        (`_assign_from_cache_masked`); unmasked leaves stay False; an
+        all-False result stays unmasked.
+  - [x] `astype` to a subarray dtype (`PyArray_CopyMaskFrom` generalised):
+        the mask is broadcast over the appended dimensions (hidden element
+        ⇒ every sub-element hidden). No longer a `ValueError`.
+  - [x] Found by widening the gate to `numpy/ma` (see below): the phase 5
+        Python code in `_stride_tricks_impl.py` read `array.mask`, which on a
+        `MaskedArray`/`mvoid` is *ma's* mask, so `np.broadcast_to(ma_or_mvoid,
+        ..., subok=True)` failed (`mvoid`) or silently re-set ma's mask. It
+        now goes through the `np.ndarray.mask` descriptor (`_get_mask`/
+        `_set_mask`); DESIGN.md records the rule.
+  - [x] Tests: `TestMaskCasting`, `TestMaskSubclassNamespace` in
+        `test_mask.py` (177 total); randomized differential check of
+        `np.array(list)`/`ndmin`/subarray against masks built with NumPy,
+        0 mismatches; RSS + refcount leak check (20000 iterations incl.
+        error paths): flat.
 - [ ] **9 — Linear algebra**
   - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
         merged, `HEAD..origin/main` is 0.
@@ -633,7 +678,10 @@ or regression. Every such gap must be listed here so it can be audited later.
 | structured dtypes (fields) | The mask is **per record** (one bool per array element), not per field; per-field masking (what `numpy.ma` does with a structured mask dtype) is out of scope. Consequences: field views `s["x"]` / `s[["x","y"]]` do **not** carry the record mask (a masked record is visible through the field view); `s["x"] = v` assigns the data and leaves the record mask unchanged. Whole-record operations (`s[i]` fancy/bool/slice, copy, sort, ...) work normally. | out of scope (revisit only if structured masking matters) |
 | assignment to a broadcast view with a read-only mask (`np.broadcast_arrays` results: data warns, mask is read-only) | fails before touching data | revisit |
 | `as_strided`/`sliding_window_view` with a stride that is not a whole number of elements, or a mask layout not proportional to the data | mask dropped | revisit (could conform the mask copy to the data layout) |
-| `astype` to a subarray dtype | raises a shape-mismatch `ValueError` (shape changes) | phase 8 |
+| `a[...] = [masked, ...]` (list/tuple RHS with masked arrays in a slice/int/ellipsis assignment) | data assigned, masks inside the list ignored (that path is the public `PyArray_CopyObject`, which has no mask hook). `a[...] = np.array([masked, ...])` carries them | revisit (route through `PyArray_FromAny` when the destination or a leaf is masked) |
+| `np.frombuffer`/buffer protocol, `getfield`, `__array_wrap__(x)` | result has no mask (the buffer/field view has no owner-mask relation) | phase 10 (buffer protocol); `getfield` follows the structured limitation |
+| `view(dtype)` with a different itemsize on a masked array | raises `ValueError` (the last axis changes; no mask view describes it) | by design; `astype()` |
+| `np.array(list_of_masked, dtype=object, ndmax=k)` with `ndmax` smaller than the depth | the masked arrays become *object elements* of the result, so the result has no mask (by construction, nothing per-element to mask); without `ndmax`, `dtype=object` carries the mask | by design |
 | 0-d/scalar results (`np.add.reduce(x)`, `x.sum()`, `x.max()`, `x[0]`, `.flat[i]`, elementwise ufuncs on 0-d, ...) | **Convention (decided): a scalar carries no mask.** NumPy decays a 0-d result to a scalar and scalars cannot carry one, so the mask is dropped there. Keep it with `axis=`, `keepdims=True` or `out=` (a 0-d `out` array keeps its mask). Reduce path: `PyUFunc_Reduce` returns a 0-d ndarray, `_propagate_reduce_mask` attaches the mask to it, then `npy_apply_wrap(..., return_scalar)` decays it to a scalar. Elementwise path: the 0-d result is decayed inside `ufunc_generic_fastcall`, before mask propagation runs. Not chosen: NaN-for-masked (float-only, destroys the value, conflates masked with invalid/missing); retaining a 0-d result (would be a one-line `return_scalar &= mask == NULL` on the reduce path plus a re-wrap on the elementwise path) | explicit `filled(fill_value)` in phase 10; revisit 0-d retention only if losing the mask on full reductions proves annoying |
 | where= with `out=None` or multi-output ufuncs | mask propagation skipped | revisit |
 | gufuncs (`matmul`, `linalg`) | mask dropped | phase 9 |

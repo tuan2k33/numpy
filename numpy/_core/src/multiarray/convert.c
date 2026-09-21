@@ -743,9 +743,8 @@ PyArray_View(PyArrayObject *self, PyArray_Descr *type, PyTypeObject *pytype)
          * Propagate the mask: a plain view of the whole mask buffer,
          * sharing memory with `self`'s mask rather than copying it (see
          * "Mask semantics and propagation" in TODO.md). Dtype-changing
-         * views (the paths below) don't propagate the mask -- changing
-         * dtype can change the element count/shape, and there's no
-         * obviously-correct mask reshape for that case yet.
+         * views (the paths below) propagate it only when the itemsize is
+         * unchanged (same shape); other itemsizes are rejected above.
          */
         if (_propagate_view_mask_if_same_topology(
                 self, (PyArrayObject *)view) < 0) {
@@ -761,11 +760,20 @@ PyArray_View(PyArrayObject *self, PyArray_Descr *type, PyTypeObject *pytype)
             Py_DECREF(type);
             return PyArray_View(self, NULL, pytype);
         }
-        PyErr_SetString(PyExc_ValueError,
-                "dtype-changing views are unsupported for masked arrays. "
-                "Use astype() if a dtype conversion is required while "
-                "preserving mask semantics.");
-        return NULL;
+        if (PyArray_ITEMSIZE(self) != PyDataType_ELSIZE(type)) {
+            /*
+             * A different itemsize changes the shape (last axis), so there
+             * is no mask that is both a view and correct for it.
+             */
+            PyErr_SetString(PyExc_ValueError,
+                    "dtype-changing views of masked arrays must keep the "
+                    "itemsize (the mask has one flag per element). "
+                    "Use astype() if a dtype conversion is required while "
+                    "preserving mask semantics.");
+            Py_DECREF(type);
+            return NULL;
+        }
+        /* Same itemsize: the shape is unchanged; the mask is viewed below. */
     }
 
     /*

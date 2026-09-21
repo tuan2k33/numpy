@@ -118,9 +118,21 @@ interfere with each other.
 - Transpose, axis moves, and `broadcast_to` apply the same shape and stride
   transformation to the mask. Broadcast masks are views and inherit the
   read-only behavior of the broadcast data view.
-- Dtype-changing views are unsupported for masked arrays. Use `astype()` if a
-  dtype conversion is required while preserving mask semantics. Unmasked
-  arrays retain NumPy's normal dtype-view behavior.
+- Dtype-changing views of masked arrays are allowed only when the itemsize
+  is unchanged (the shape is then unchanged and the mask is shared as a view);
+  a different itemsize changes the last axis, which no view of the mask can
+  describe, so it raises and points at `astype()`. Unmasked arrays retain
+  NumPy's normal dtype-view behavior.
+- Casting copies the mask like it copies the data (`astype`, `np.array`/
+  `asarray`/`ascontiguousarray`/`require` with `dtype=`, `np.astype`); a
+  cast to a subarray dtype (which appends dimensions) hides every
+  sub-element of a hidden element. `np.array(a, ndmin=n)` prepends ones to
+  the mask as it does to the data. `np.array([a, b, ...])` (nested
+  lists/tuples of arrays) builds the result mask from the masked leaves;
+  unmasked leaves are unmasked. `can_cast`/`result_type` are mask-blind.
+- Python-level helpers inside NumPy must reach the built-in mask through
+  `np.ndarray.mask` (base-class descriptor), never `obj.mask`: a subclass such
+  as `numpy.ma.MaskedArray` defines its own, unrelated `mask`.
 
 - Advanced/fancy and boolean indexing return copies, so the mask is copied
   too: the mask is indexed with the identical index object. Item assignment

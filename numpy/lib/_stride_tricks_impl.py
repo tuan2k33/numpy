@@ -35,7 +35,12 @@ def _maybe_view_as_subclass(original_array, new_array):
     return new_array
 
 
-@set_module("numpy.lib.stride_tricks")
+# The built-in mask, read/written through the base-class descriptor: a
+# subclass (e.g. `numpy.ma.MaskedArray`) may define its own, unrelated `mask`.
+_get_mask = np.ndarray.mask.__get__
+_set_mask = np.ndarray.mask.__set__
+
+
 def _as_strided_carry_mask(base, view, writeable):
     """Attach a mask to the raw-strided `view` of a masked `base`.
 
@@ -46,7 +51,7 @@ def _as_strided_carry_mask(base, view, writeable):
     Otherwise there is no mapping and the mask is not carried over (fail-open,
     see "Known limitations" in TODO.md).
     """
-    mask = base.mask
+    mask = _get_mask(base)
     itemsize = base.itemsize
     if itemsize == 0:
         return
@@ -56,12 +61,13 @@ def _as_strided_carry_mask(base, view, writeable):
     for size, stride in zip(view.shape, view.strides):
         if size > 1 and stride % itemsize != 0:
             return
-    view.mask = as_strided(
+    _set_mask(view, as_strided(
         mask, shape=view.shape,
         strides=tuple(stride // itemsize for stride in view.strides),
-        writeable=writeable)
+        writeable=writeable))
 
 
+@set_module("numpy.lib.stride_tricks")
 def as_strided(
     x, shape=None, strides=None, subok=False, writeable=True, *, check_bounds=None
 ):
@@ -173,7 +179,7 @@ def as_strided(
     if view.flags.writeable and not writeable:
         view.flags.writeable = False
 
-    if base.mask is not None:
+    if _get_mask(base) is not None:
         _as_strided_carry_mask(base, view, writeable)
 
     if check_bounds:
@@ -489,8 +495,8 @@ def _broadcast_to(array, shape, subok, readonly):
         # never really has writebackifcopy semantics
         broadcast = it.itviews[0]
     result = _maybe_view_as_subclass(array, broadcast)
-    if array.mask is not None:
-        result.mask = np.broadcast_to(array.mask, result.shape)
+    if _get_mask(array) is not None:
+        _set_mask(result, np.broadcast_to(_get_mask(array), result.shape))
     # In a future version this will go away
     if not readonly and array.flags._writeable_no_warn:
         result.flags.writeable = True
