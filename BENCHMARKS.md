@@ -2,9 +2,9 @@
 
 All timing columns are **milliseconds (ms)**, formatted `min / median`
 over 20-30 repeats (`N=2_000_000` for phase 2-3 ops, `N=500_000` for
-phase 4 ops). The last two columns are `fork nomask − upstream` and
-`fork nomask − fork mask`; both use the same ms unit. Latest measurement per
-op only.
+phase 4 ops, `N=1_000_000` for phase 6 ops). The last two columns are
+`fork nomask − upstream` and the mask overhead `fork mask − fork nomask`;
+both use the same ms unit. Latest measurement per op only.
 
 In each timing cell, `/` separates the minimum and median of the measured
 runs. The table keeps `masked` next to the fork's no-mask baseline for quick
@@ -18,7 +18,7 @@ were reran 3x for `add`/`less`/`sin`
 (phase 3) and `reduce`/`accumulate`/`reduceat`/`outer`/`at`/`sum`/`std`
 (phase 4) and stayed positive (masked slower) every single run.
 
-| phase | op | upstream | fork nomask | fork mask | fork nomask − upstream | fork nomask − fork mask |
+| phase | op | upstream | fork nomask | fork mask | fork nomask − upstream | mask overhead (mask − nomask) |
 |---|---|---|---|---|---|---|
 | 2 | copy | 1.24 / 1.81 | 1.49 / 1.73 | — | -0.08 | — |
 | 2 | view / `a[:]` / `a[2:N:3]` / reshape / ravel / squeeze | ~0 | ~0 | — | ~0 | — |
@@ -46,3 +46,8 @@ were reran 3x for `add`/`less`/`sin`
 | 4 | `.var()` | 0.46 / 0.64 | 0.60 / 0.96 | — | +0.32 | — |
 | 4 | `.max()` | 0.06 / 0.06 | 0.10 / 0.13 | — | +0.07 | — |
 | 4 | `.argmax()` | 0.07 / 0.08 | 0.11 / 0.17 | — | +0.09 | — |
+| 6 | `a[idx]` (200k fancy) | 1.16 / 1.46 | 0.85 / 1.73 | 2.03 / 3.07 | ~0 (noisy, flips sign) | +0.67–1.18 |
+| 6 | `a[sel]` (bool, ~500k picked) | 4.90 / 5.05 | 5.02 / 5.56 | 9.89 / 10.29 | +0.12 | +4.87–5.04 |
+| 6 | `a[idx] = v` | 0.65 / 0.78 | 0.52 / 0.68 | 0.91 / 1.36 | ~0 (noisy, flips sign) | +0.39–0.52 |
+| 6 | `a[sel] = v` | 4.65 / 4.80 | 4.88 / 5.62 | 9.76 / 10.58 | +0.23 | +4.88–5.17 |
+| 6 | `a.flat[idx]` | 4.91 / 6.45 | 3.05 / 5.48 | 7.18 / 8.82 | ~0 (noisy, flips sign) | +3.91–4.13 |

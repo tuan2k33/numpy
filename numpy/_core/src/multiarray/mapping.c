@@ -1486,6 +1486,52 @@ _get_field_view(PyArrayObject *arr, PyObject *ind, PyArrayObject **view)
     return -1;
 }
 
+static int
+array_assign_subscript(PyArrayObject *self, PyObject *ind, PyObject *op);
+
+/*
+ * After `self[ind] = op` succeeded for the data, make the mask agree: the
+ * assigned elements take the mask of `op` (False for an unmasked `op`), by
+ * running the identical assignment on the mask. A masked `op` assigned into
+ * an unmasked `self` creates the mask (all False elsewhere).
+ */
+static int
+array_assign_mask_subscript(PyArrayObject *self, PyObject *ind, PyObject *op)
+{
+    PyArrayObject *rhs_mask = NULL;
+    PyArrayObject *mask = (PyArrayObject *)PyArray_MASK(self);
+
+    if (PyArray_CHKFLAGS(self, NPY_ARRAY_IS_MASK)) {
+        /* A mask cannot itself carry a mask: assigning to it is plain. */
+        return 0;
+    }
+
+    if (PyArray_Check(op)) {
+        rhs_mask = (PyArrayObject *)PyArray_MASK((PyArrayObject *)op);
+    }
+
+    if (mask == NULL && rhs_mask == NULL) {
+        return 0;
+    }
+
+    if (mask == NULL) {
+        mask = (PyArrayObject *)PyArray_ZEROS(
+                PyArray_NDIM(self), PyArray_DIMS(self), NPY_BOOL, 0);
+        if (mask == NULL) {
+            return -1;
+        }
+        if (array_assign_subscript(
+                mask, ind, rhs_mask == NULL ? Py_False : (PyObject *)rhs_mask) < 0) {
+            Py_DECREF(mask);
+            return -1;
+        }
+        return PyArray_SetMaskObject(self, (PyObject *)mask);
+    }
+
+    return array_assign_subscript(
+            mask, ind, rhs_mask == NULL ? Py_False : (PyObject *)rhs_mask);
+}
+
 /*
  * General function for indexing a NumPy array with a Python object.
  */
@@ -1784,6 +1830,25 @@ array_subscript(PyArrayObject *self, PyObject *op)
     }
 
   finish:
+    /*
+     * Boolean and fancy indexing return a copy, so the mask is copied the
+     * same way: index the mask with the identical index object. This lives
+     * after `finish:` so every path that produced a bool/fancy result
+     * (the single-boolean fast path, the 1-d fancy fast path, and the
+     * general MapIter path) is covered. Basic indexing already attached a
+     * mask view above.
+     */
+    if (result != NULL && PyArray_MASK(self) != NULL &&
+            PyArray_Check(result) &&
+            (index_type == HAS_BOOL || (index_type & HAS_FANCY))) {
+        PyObject *mask_result = array_subscript(
+                (PyArrayObject *)PyArray_MASK(self), op);
+        if (mask_result == NULL ||
+                PyArray_SetMaskObject(
+                        (PyArrayObject *)result, mask_result) < 0) {
+            Py_CLEAR(result);
+        }
+    }
     NPY_cast_info_xfree(&cast_info);
     Py_XDECREF(mit);
     Py_XDECREF(view);
@@ -1825,6 +1890,14 @@ array_assign_item(PyArrayObject *self, Py_ssize_t i, PyObject *op)
         i -= PyArray_DIM(self, 0);
     }
 
+    const Py_ssize_t mask_index = i;
+    if (PyArray_MASK(self) != NULL &&
+            PyArray_FailUnlessWriteable(
+                (PyArrayObject *)PyArray_MASK(self),
+                "assignment destination's mask") < 0) {
+        return -1;
+    }
+
     indices[0].value = i;
     indices[0].type = HAS_INTEGER;
     if (PyArray_NDIM(self) == 1) {
@@ -1849,6 +1922,17 @@ array_assign_item(PyArrayObject *self, Py_ssize_t i, PyObject *op)
             return -1;
         }
         Py_DECREF(view);
+    }
+    {
+        PyObject *index = PyLong_FromSsize_t(mask_index);
+        if (index == NULL) {
+            return -1;
+        }
+        int res = array_assign_mask_subscript(self, index, op);
+        Py_DECREF(index);
+        if (res < 0) {
+            return -1;
+        }
     }
     return 0;
 }
@@ -1879,6 +1963,13 @@ array_assign_subscript(PyArrayObject *self, PyObject *ind, PyObject *op)
         return -1;
     }
     if (PyArray_FailUnlessWriteable(self, "assignment destination") < 0) {
+        return -1;
+    }
+    if (PyArray_MASK(self) != NULL &&
+            PyArray_FailUnlessWriteable(
+                (PyArrayObject *)PyArray_MASK(self),
+                "assignment destination's mask") < 0) {
+        /* Fail before touching the data rather than half-apply. */
         return -1;
     }
 
@@ -1914,6 +2005,9 @@ array_assign_subscript(PyArrayObject *self, PyObject *ind, PyObject *op)
             return -1;
         }
         if (PyArray_Pack(PyArray_DESCR(self), item, op) < 0) {
+            return -1;
+        }
+        if (array_assign_mask_subscript(self, ind, op) < 0) {
             return -1;
         }
         /* integers do not store objects in indices */
@@ -2237,7 +2331,7 @@ array_assign_subscript(PyArrayObject *self, PyObject *ind, PyObject *op)
     for (i=0; i < index_num; i++) {
         Py_XDECREF(indices[i].object);
     }
-    return 0;
+    return array_assign_mask_subscript(self, ind, op);
 }
 
 

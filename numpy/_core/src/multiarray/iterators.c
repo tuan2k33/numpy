@@ -510,8 +510,8 @@ iter_subscript_int(PyArrayIterObject *self, PyArrayObject *ind,
 }
 
 /* Always returns arrays */
-NPY_NO_EXPORT PyObject *
-iter_subscript(PyArrayIterObject *self, PyObject *ind)
+static PyObject *
+iter_subscript_data(PyArrayIterObject *self, PyObject *ind)
 {
     PyObject *ret = NULL;
 
@@ -548,7 +548,7 @@ iter_subscript(PyArrayIterObject *self, PyObject *ind)
             goto finish;
         }
 
-        ret = iter_subscript(self, ind);
+        ret = iter_subscript_data(self, ind);
         Py_DECREF(ind);
         goto finish;
     }
@@ -768,8 +768,8 @@ iter_ass_sub_int(PyArrayIterObject *self, PyArrayObject *ind,
     return 0;
 }
 
-NPY_NO_EXPORT int
-iter_ass_subscript(PyArrayIterObject *self, PyObject *ind, PyObject *val)
+static int
+iter_ass_subscript_data(PyArrayIterObject *self, PyObject *ind, PyObject *val)
 {
     if (val == NULL) {
         PyErr_SetString(PyExc_TypeError,
@@ -822,7 +822,7 @@ iter_ass_subscript(PyArrayIterObject *self, PyObject *ind, PyObject *val)
             goto finish;
         }
 
-        ret = iter_ass_subscript(self, ind, val);
+        ret = iter_ass_subscript_data(self, ind, val);
         Py_DECREF(ind);
         goto finish;
     }
@@ -942,6 +942,84 @@ finish:
 }
 
 
+/*
+ * Mask-aware wrappers: `a.flat[ind]` indexes the flattened (C-order) view of
+ * `a`, and that order is layout independent, so applying the identical flat
+ * index to the mask's flat iterator yields the matching mask. Scalar results
+ * (integer index) cannot carry a mask -- the usual documented scalar gap.
+ */
+NPY_NO_EXPORT PyObject *
+iter_subscript(PyArrayIterObject *self, PyObject *ind)
+{
+    PyObject *ret = iter_subscript_data(self, ind);
+    PyObject *mask = PyArray_MASK(self->ao);
+    if (ret == NULL || mask == NULL || !PyArray_Check(ret)) {
+        return ret;
+    }
+    PyArrayIterObject *mask_it = (PyArrayIterObject *)PyArray_IterNew(mask);
+    if (mask_it == NULL) {
+        Py_DECREF(ret);
+        return NULL;
+    }
+    PyObject *mask_ret = iter_subscript_data(mask_it, ind);
+    Py_DECREF(mask_it);
+    if (mask_ret == NULL ||
+            PyArray_SetMaskObject((PyArrayObject *)ret, mask_ret) < 0) {
+        Py_DECREF(ret);
+        return NULL;
+    }
+    return ret;
+}
+
+NPY_NO_EXPORT int
+iter_ass_subscript(PyArrayIterObject *self, PyObject *ind, PyObject *val)
+{
+    PyArrayObject *ao = self->ao;
+    PyObject *mask = PyArray_MASK(ao);
+    PyObject *val_mask = NULL;
+
+    if (val != NULL && PyArray_Check(val)) {
+        val_mask = PyArray_MASK((PyArrayObject *)val);
+    }
+    if (mask != NULL &&
+            PyArray_FailUnlessWriteable((PyArrayObject *)mask,
+                                        "underlying array's mask") < 0) {
+        return -1;
+    }
+    if (iter_ass_subscript_data(self, ind, val) < 0) {
+        return -1;
+    }
+    if (PyArray_CHKFLAGS(ao, NPY_ARRAY_IS_MASK) ||
+            (mask == NULL && val_mask == NULL)) {
+        return 0;
+    }
+
+    int res = -1;
+    PyObject *new_mask = NULL;
+    if (mask == NULL) {
+        /* A masked value assigned into an unmasked array creates the mask. */
+        new_mask = PyArray_ZEROS(
+                PyArray_NDIM(ao), PyArray_DIMS(ao), NPY_BOOL, 0);
+        if (new_mask == NULL) {
+            return -1;
+        }
+        mask = new_mask;
+    }
+    PyArrayIterObject *mask_it = (PyArrayIterObject *)PyArray_IterNew(mask);
+    if (mask_it != NULL) {
+        res = iter_ass_subscript_data(
+                mask_it, ind, val_mask == NULL ? Py_False : val_mask);
+        Py_DECREF(mask_it);
+    }
+    if (res == 0 && new_mask != NULL) {
+        Py_INCREF(new_mask);
+        res = PyArray_SetMaskObject(ao, new_mask);
+    }
+    Py_XDECREF(new_mask);
+    return res;
+}
+
+
 static PyMappingMethods iter_as_mapping = {
     (lenfunc)iter_length,                   /*mp_length*/
     (binaryfunc)iter_subscript,             /*mp_subscript*/
@@ -1004,6 +1082,16 @@ iter_array(PyArrayIterObject *it, PyObject *NPY_UNUSED(args), PyObject *NPY_UNUS
         }
         PyArray_CLEARFLAGS(ret, NPY_ARRAY_WRITEABLE);
     }
+    if (PyArray_MASK(it->ao) != NULL) {
+        /* C-order ravel of the mask matches the C-order flat data. */
+        PyObject *mask_flat = PyArray_Ravel(
+                (PyArrayObject *)PyArray_MASK(it->ao), NPY_CORDER);
+        if (mask_flat == NULL ||
+                PyArray_SetMaskObject(ret, mask_flat) < 0) {
+            Py_DECREF(ret);
+            return NULL;
+        }
+    }
     return ret;
 
 }
@@ -1014,7 +1102,17 @@ iter_copy(PyArrayIterObject *it, PyObject *args)
     if (!PyArg_ParseTuple(args, "")) {
         return NULL;
     }
-    return PyArray_Flatten(it->ao, 0);
+    PyObject *flat = PyArray_Flatten(it->ao, 0);
+    if (flat != NULL && PyArray_MASK(it->ao) != NULL) {
+        PyObject *mask_flat = PyArray_Flatten(
+                (PyArrayObject *)PyArray_MASK(it->ao), 0);
+        if (mask_flat == NULL ||
+                PyArray_SetMaskObject((PyArrayObject *)flat, mask_flat) < 0) {
+            Py_DECREF(flat);
+            return NULL;
+        }
+    }
+    return flat;
 }
 
 static PyMethodDef iter_methods[] = {

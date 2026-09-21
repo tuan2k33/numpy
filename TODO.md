@@ -35,8 +35,8 @@ inside the phase's checklist, so drift is easy to spot at a glance:
 
 Current focus:
 
-- **Phase 6:** implement advanced/fancy and boolean indexing.
-- **Phase 7:** implement gather, scatter, and combine/split operations.
+- **Phase 6:** done (advanced/fancy and boolean indexing, assignment, `.flat`).
+- **Phase 7:** next — gather, scatter, and combine/split operations.
 - Phase 5 is complete (incl. `astype`/`flatten`/`diagonal`/`real`/`imag`); keep the cross-test, design review, NEP review, and
   plain-array baseline as the gate for every change.
 
@@ -71,6 +71,16 @@ Current focus:
   - `test_mask.py`: all phase-5 tests pass (the phase-6 WIP tests in the same
     file are excluded from this gate).
   - Match with the plain-array baseline: ✅ no regression.
+
+- **Phase 6 — advanced/boolean indexing, assignment, `.flat`**
+  - `test_multiarray.py` + `test_indexing.py` (`-m "not slow"`): 14937
+    passed, 17 skipped, 12 deselected, 0 failed — ✅ identical to the phase 5
+    row.
+  - Plus `test_umath.py`, `test_ufunc.py`, `test_shape_base.py`,
+    `test_stride_tricks.py`, `test_regression.py`, `test_item_selection.py`:
+    21668 passed, 78 skipped, 12 deselected, 7 xfailed in one combined run
+    (superset of the phase 5 groups), 0 failed.
+  - `test_mask.py`: 114 passed.
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
@@ -462,12 +472,44 @@ tests from scratch.
         `asfortranarray`, ...).
   - Remaining mask drops after phase 5 are tracked under "Known limitations
     (fail-open)" at the bottom of this file.
-- [ ] **6 — Indexing**
-  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
+- [x] **6 — Indexing**
+  - [x] Sync upstream first (standing rule in Housekeeping): `origin/main`
         merged, `HEAD..origin/main` is 0.
-  - [ ] `multiarray/mapping.c` — basic indexing already covered in phase 2;
-        advanced/fancy + boolean indexing (copy — build new mask
-        explicitly), assignment through indexing
+  - [x] `multiarray/mapping.c` getitem: advanced/fancy and boolean indexing
+        return a copy, so the mask is copied the same way — `array_subscript`
+        indexes the mask with the identical index object. The hook sits after
+        `finish:` so it covers the single-boolean fast path, the 1-d fancy
+        fast path and the general MapIter path (basic indexing already
+        attached a mask view in phase 2). An all-False selection
+        canonicalizes to `mask is None`.
+  - [x] Assignment (`array_assign_mask_subscript`, `array_assign_item`):
+        after the data assignment succeeds, the same assignment runs on the
+        mask with the RHS's mask (`False` for an unmasked RHS); a masked RHS
+        assigned into an unmasked array creates the mask. Convention: the
+        assigned elements take the *RHS's* masked-ness (assigning new data
+        unhides those elements). Assigning into an array that is itself a
+        mask stays plain (a mask cannot carry a mask). If the destination's
+        mask is read-only the assignment fails *before* touching the data
+        instead of half-applying. Per the "Unmasked representation" rules,
+        an internal assignment that leaves the mask all-False does not
+        re-scan to canonicalize it to `None`.
+  - [x] Dependency pulled forward from phase 7's `.flat`: `a.flat[...]` get
+        and set (`iter_subscript`/`iter_ass_subscript` wrappers in
+        `iterators.c`, applying the identical C-order flat index to the mask's
+        flat iterator), `flatiter.copy()` and `np.asarray(a.flat)`.
+  - [x] Fixed a reference leak in the WIP `success:` cleanup path of
+        `array_assign_subscript` (the mask update now runs after all
+        temporaries are released).
+  - [x] Tests: `TestMaskIndexing` in `test_mask.py` (getitem, setitem,
+        overlap/swap, read-only mask, in-place ops through an index,
+        `.flat`). A 4000-case randomized differential check of get + set
+        against a plain-array reference model found 0 mismatches. Leak check
+        (RSS + refcount of both the destination and the RHS mask, 40000
+        iterations each, error paths included): flat.
+  - **Still not carried after phase 6** (fail-open, see "Known limitations"):
+    structured-field assignment (`s["x"] = v`) leaves the element mask
+    unchanged; `a.flat = v` (whole-array flat assignment); scalar results
+    (`a[i]`, `a.flat[i]`) cannot carry a mask.
 - [ ] **7 — Gather, scatter, and combine/split**
   - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
         merged, `HEAD..origin/main` is 0.
@@ -517,7 +559,9 @@ or regression. Every such gap must be listed here so it can be audited later.
 
 | Operation | What happens | Planned |
 |---|---|---|
-| `.flat[...]`, `.flat[i] = v`, `flatiter.copy()` (`iterators.c`) | mask dropped | phase 6 |
+| `a.flat = v` (whole flat assignment, `getset.c`) | data assigned, mask left unchanged | phase 7 |
+| structured-field assignment `s["x"] = v` (`mapping.c`) | data assigned, element mask left unchanged | revisit |
+| assignment to a broadcast view with a read-only mask (`np.broadcast_arrays` results: data warns, mask is read-only) | fails before touching data | revisit |
 | `as_strided`/`sliding_window_view` with a stride that is not a whole number of elements, or a mask layout not proportional to the data | mask dropped | revisit (could conform the mask copy to the data layout) |
 | `astype` to a subarray dtype | raises a shape-mismatch `ValueError` (shape changes) | phase 8 |
 | 0-d/scalar results (`np.add.reduce(x)`, `x[0]`, ...) | mask dropped (scalars cannot carry one) | decide in phase 10 |

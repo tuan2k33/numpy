@@ -816,3 +816,228 @@ class TestMaskCoreTransport:
         with pytest.raises(ValueError, match=r"Use astype\(\)"):
             a.view(np.int32)
 
+
+class TestMaskIndexing:
+    """Phase 6: advanced/fancy and boolean indexing, assignment, `.flat`."""
+
+    def _a(self):
+        a = np.arange(6)
+        a.mask = np.array([False, True, False, True, False, False])
+        return a
+
+    def _b(self):
+        b = np.arange(12).reshape(3, 4)
+        b.mask = (b % 5 == 0) | (b == 7)
+        return b
+
+    # ----- getitem -----------------------------------------------------
+    def test_integer_array_indexing_propagates_mask(self):
+        a = self._a()
+        result = a[np.array([4, 1, 3, 0])]
+        assert np.array_equal(result, [4, 1, 3, 0])
+        assert np.array_equal(result.mask, [False, True, True, False])
+        assert not np.shares_memory(result.mask, a.mask)  # copy, like data
+
+    def test_negative_and_repeated_indices(self):
+        a = self._a()
+        assert np.array_equal(a[[-5, 1, 1, -3]].mask, [True, True, True, True])
+        assert np.array_equal(a[[]].shape, (0,))
+
+    def test_broadcasted_integer_indexing_propagates_mask(self):
+        a = np.arange(6).reshape(2, 3)
+        a.mask = np.array([[False, True, False], [True, False, False]])
+        rows = np.array([[0], [1]])
+        cols = np.array([[1, 2, 0], [2, 0, 1]])
+        result = a[rows, cols]
+        expected = a.mask[rows, cols]
+        assert result.shape == (2, 3)
+        assert np.array_equal(result.mask, expected)
+        assert np.array_equal(result.mask,
+                              [[True, False, False], [False, True, False]])
+
+    def test_boolean_indexing_propagates_selected_mask(self):
+        a = self._a()
+        result = a[np.array([True, False, True, True, False, False])]
+        assert np.array_equal(result, [0, 2, 3])
+        assert np.array_equal(result.mask, [False, False, True])
+
+    def test_boolean_indexing_nd(self):
+        b = self._b()
+        sel = (b % 2 == 0)
+        result = b[sel]
+        assert result.ndim == 1
+        assert np.array_equal(result.mask, b.mask[sel])
+        # boolean index along the first axis only
+        rows = np.array([True, False, True])
+        assert np.array_equal(b[rows].mask, b.mask[rows])
+
+    def test_mixed_fancy_and_slice(self):
+        b = self._b()
+        for idx in [(slice(None), [0, 2]), ([0, 2], slice(None)),
+                    ([0, 2], slice(1, 3)), (Ellipsis, [3, 0]),
+                    ([[0], [2]], [1, 3]), (1, [0, 1]), ([0, 1], 2)]:
+            result = b[idx]
+            expected = b.mask[idx]
+            got = (result.mask if result.mask is not None
+                   else np.zeros(result.shape, bool))
+            assert np.array_equal(got, expected), idx
+
+    def test_advanced_indexing_unmasked_input_stays_unmasked(self):
+        a = np.arange(6)
+        assert a[np.array([4, 1, 3])].mask is None
+        assert a[a > 2].mask is None
+
+    def test_all_false_selection_canonicalizes(self):
+        a = self._a()
+        assert a[[0, 2, 4]].mask is None
+
+    def test_index_out_of_bounds_raises_and_leaves_state(self):
+        a = self._a()
+        before = a.mask.copy()
+        with pytest.raises(IndexError):
+            a[[0, 99]]
+        assert np.array_equal(a.mask, before)
+
+    def test_using_the_mask_as_an_index(self):
+        a = self._a()
+        result = a[a.mask]
+        assert np.array_equal(result, [1, 3])
+        assert np.array_equal(result.mask, [True, True])
+
+    # ----- setitem -----------------------------------------------------
+    def test_indexed_assignment_clears_mask_for_unmasked_rhs(self):
+        a = self._a()
+        a.mask = np.array([False, True, True, False, False, False])
+        a[np.array([1, 2])] = np.array([10, 20])
+        assert np.array_equal(a, [0, 10, 20, 3, 4, 5])
+        # Internal ops do not re-scan to canonicalize an all-False mask.
+        assert not np.asarray(a.mask).any()
+
+    def test_indexed_assignment_keeps_other_mask_entries(self):
+        a = self._a()
+        a[[0, 1]] = 99
+        assert np.array_equal(a.mask, [False, False, False, True, False, False])
+
+    def test_indexed_assignment_propagates_mask_from_rhs(self):
+        a = np.arange(6)
+        rhs = np.array([10, 20])
+        rhs.mask = np.array([True, False])
+        a[np.array([1, 4])] = rhs
+        assert np.array_equal(a, [0, 10, 2, 3, 20, 5])
+        assert np.array_equal(a.mask, [False, True, False, False, False, False])
+
+    def test_boolean_assignment_propagates_mask_from_rhs(self):
+        a = np.arange(5)
+        a.mask = np.array([True, False, False, False, False])
+        rhs = np.array([10, 20])
+        rhs.mask = np.array([False, True])
+        a[np.array([False, True, True, False, False])] = rhs
+        assert np.array_equal(a, [0, 10, 20, 3, 4])
+        assert np.array_equal(a.mask, [True, False, True, False, False])
+
+    def test_boolean_assignment_scalar_clears_selected(self):
+        a = self._a()
+        a[a.mask] = 0
+        assert not np.asarray(a.mask).any()
+
+    def test_slice_and_integer_assignment(self):
+        b = self._b()
+        b[0, :] = 0
+        assert not b.mask[0].any()
+        assert np.array_equal(b.mask[1:], (np.arange(12).reshape(3, 4) % 5 == 0)[1:]
+                              | (np.arange(12).reshape(3, 4) == 7)[1:])
+        c = self._a()
+        c[1] = 5
+        assert not c.mask[1] and c.mask[3]
+        c[...] = 0
+        assert not np.asarray(c.mask).any()
+
+    def test_masked_rhs_into_unmasked_array_creates_mask(self):
+        a = np.arange(6)
+        rhs = np.array([7, 8, 9])
+        rhs.mask = np.array([False, True, False])
+        a[[0, 2, 4]] = rhs
+        assert np.array_equal(a.mask, [False, False, True, False, False, False])
+        b = np.arange(4)
+        b[1] = rhs[1]  # scalar element: masked-ness cannot ride a scalar
+        assert b.mask is None
+
+    def test_masked_slice_assignment(self):
+        a = np.arange(6)
+        rhs = np.array([7, 8, 9])
+        rhs.mask = np.array([True, False, True])
+        a[1:4] = rhs
+        assert np.array_equal(a.mask, [False, True, False, True, False, False])
+
+    def test_assignment_swap_with_overlap(self):
+        a = self._a()
+        a[[0, 1]] = a[[1, 0]]
+        assert np.array_equal(a, [1, 0, 2, 3, 4, 5])
+        assert np.array_equal(a.mask, [True, False, False, True, False, False])
+
+    def test_assigning_into_a_mask_is_plain(self):
+        a = self._a()
+        m = a.mask
+        rhs = np.array([True, True])
+        rhs.mask = np.array([True, False])
+        m[[0, 2]] = rhs  # data assignment only: a mask cannot carry a mask
+        assert m[0] and m[2]
+        assert m.mask is None
+
+    def test_read_only_mask_fails_before_touching_data(self):
+        a = self._a()
+        a.mask.flags.writeable = False
+        with pytest.raises(ValueError, match="read-only"):
+            a[[0, 1]] = 99
+        assert np.array_equal(a, np.arange(6))
+
+    def test_inplace_op_through_index_keeps_masks(self):
+        a = self._a()
+        a[[0, 1, 4]] += 100
+        assert np.array_equal(a, [100, 101, 2, 3, 104, 5])
+        assert np.array_equal(a.mask, [False, True, False, True, False, False])
+
+    def test_structured_field_assignment_leaves_mask_alone(self):
+        s = np.zeros(3, dtype=[("x", "i4"), ("y", "f8")])
+        s.mask = np.array([False, True, False])
+        s["x"] = 7
+        assert np.array_equal(s.mask, [False, True, False])
+
+    # ----- .flat -------------------------------------------------------
+    def test_flat_slice_and_fancy_get(self):
+        b = self._b()
+        for idx in [slice(1, 9, 2), [0, 5, 7], slice(None)]:
+            result = b.flat[idx]
+            expected = b.mask.flat[idx]
+            got = (result.mask if result.mask is not None
+                   else np.zeros(result.shape, bool))
+            assert np.array_equal(got, expected), idx
+
+    def test_flat_bool_get_and_non_contiguous(self):
+        b = self._b().T  # non-contiguous, C-order flat differs from memory
+        sel = np.zeros(12, bool)
+        sel[[0, 3, 6, 9]] = True
+        result = b.flat[sel]
+        assert np.array_equal(result.mask, b.mask.flat[sel])
+
+    def test_flat_scalar_get_is_a_scalar(self):
+        # Documented gap: a scalar cannot carry a mask.
+        assert isinstance(self._a().flat[1], np.generic)
+
+    def test_flat_assignment_updates_mask(self):
+        b = self._b()
+        b.flat[[0, 5]] = 1
+        assert not b.mask[0, 0] and not b.mask[1, 1]
+        rhs = np.array([1, 2])
+        rhs.mask = np.array([True, False])
+        c = np.arange(6).reshape(2, 3)
+        c.flat[[1, 4]] = rhs
+        assert np.array_equal(c.mask, [[False, True, False], [False, False, False]])
+
+    def test_flat_copy_and_array(self):
+        b = self._b()
+        assert np.array_equal(b.flat.copy().mask, b.mask.flatten())
+        assert np.array_equal(np.asarray(b.flat).mask, b.mask.flatten())
+        t = b.T
+        assert np.array_equal(t.flat.copy().mask, t.mask.flatten())
+        assert np.array_equal(np.asarray(t.flat).mask, t.mask.flatten())

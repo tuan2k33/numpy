@@ -122,6 +122,15 @@ interfere with each other.
   dtype conversion is required while preserving mask semantics. Unmasked
   arrays retain NumPy's normal dtype-view behavior.
 
+- Advanced/fancy and boolean indexing return copies, so the mask is copied
+  too: the mask is indexed with the identical index object. Item assignment
+  `a[idx] = rhs` makes the assigned elements take the *RHS's* masked-ness
+  (unmasked RHS → unmasked; masked RHS into an unmasked array creates the
+  mask): assigning new data unhides those elements. Assigning into an array
+  that is itself serving as a mask is plain data assignment. If the
+  destination's mask is read-only the assignment fails before the data is
+  touched, never half-applied.
+
 ## Fail-open policy for unsupported operations
 
 While the feature is being built, an operation that has no mask support yet
