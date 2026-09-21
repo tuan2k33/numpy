@@ -114,11 +114,10 @@ element contributes to it.
 
 - `repr`/`str` print a hidden cell as `--` and never its value; hidden cells
   are left out of width/precision decisions.
-- `ndarray.filled(fill_value=<default>)` is the one way to get replacement
-  values: a new plain, unmasked copy, the array is never changed. Without an
-  argument it fills with the dtype's NA pattern from
-  [`LAYOUTS.md`](LAYOUTS.md); dtypes that table rejects (`object`,
-  `StringDType`, unsized `S`/`U`/`V`) raise unless a value is passed.
+- `ndarray.filled(fill_value=0)` is the one way to get replacement values: a
+  new plain, unmasked copy, the array is never changed. Without an argument it
+  fills with the zero of the dtype, as `np.zeros` builds it. (The hidden value
+  is real, known data, so the fill is a placeholder, not a "missing" marker.)
 - Pickle carries the mask as an extra state item (unmasked pickles unchanged).
 - The buffer protocol, `tobytes`/`tofile`/`np.save` and `tolist` export the
   data only, hidden values included, no mask.
@@ -138,7 +137,7 @@ propagates instead, so those are composed from `filled(neutral)` and the mask
 (`a.filled(0).sum(axis)` with mask `a.mask.all(axis)`, ...). Not reproducible, by
 design: `ma.masked` and masked scalars, automatic masking of invalid results
 (`sqrt(-1)`), hard masks, per-field masks, a `fill_value` *attribute* (there is
-only the `filled` default).
+only the `filled` default of zero).
 
 ## Fail-open policy
 

@@ -112,18 +112,3 @@ The T sizes in the table are for x86-64 Linux.
 An earlier version also had a flag layout, the value followed by a validity
 byte. Nothing common needed it once strings and records got patterns, and it
 is kept in `archive/flag-layout/`.
-
-## Use in this repository
-
-Copied from the `nulldtype` project. On the `refactor/ndarray-mask` branch this
-table is the default fill value of `ndarray.filled()`: `a.filled()` replaces
-every hidden element with the pattern of its dtype, `a.filled(v)` with `v`.
-Only the "NA stored as" column is used, as the value of one element in the
-array's own dtype; the rules differ from `nulldtype` where this branch has no
-reason to reject a dtype:
-
-- `longdouble` / `clongdouble` are filled with a NaN of their own dtype (no
-  substitution by `float64`/`complex128`, no warning, no size change).
-- `object`, `StringDType`, unsized `S`/`U`/`V` and user dtypes raise
-  `TypeError` from `filled()` with no argument, but can still carry a mask and
-  be filled with an explicit value.

@@ -2008,30 +2008,26 @@ class TestMaskPythonSurface:
         assert np.array_equal(np.asarray(a).view(np.ndarray)[1], 2.0)
         assert np.array_equal(a.mask, [False, True, False])
 
-    # Default fill value: the NA pattern of LAYOUTS.md, byte for byte
-    _DEFAULT_FILL = [
-        (np.bool, "02"),
-        (np.int8, "80"), (np.int16, "0080"), (np.int32, "00000080"),
-        (np.int64, "0000000000000080"),
-        (np.uint8, "ff"), (np.uint16, "ffff"), (np.uint32, "ffffffff"),
-        (np.uint64, "ffffffffffffffff"),
-        (np.float16, "ff7f"), (np.float32, "ffffff7f"),
-        (np.float64, "ffffffffffffff7f"),
-        (np.complex64, "ffffff7fffffff7f"),
-        (np.complex128, "ffffffffffffff7fffffffffffffff7f"),
-        ("M8[D]", "0000000000000080"), ("m8[s]", "0000000000000080"),
-        ("S3", "ffffff"), ("U2", "ffff0000ffff0000"), ("V4", "ffffffff"),
-    ]
-
-    @pytest.mark.parametrize("dtype, expected", _DEFAULT_FILL)
-    def test_filled_default_is_the_na_pattern(self, dtype, expected):
+    # Default fill value: the zero of the dtype, as np.zeros builds it
+    @pytest.mark.parametrize("dtype", [
+        np.bool, np.int8, np.int64, np.uint8, np.uint64, np.float16, np.float32,
+        np.float64, np.longdouble, np.complex64, np.complex128, np.clongdouble,
+        "M8[D]", "m8[s]", "S3", "U3", "V4", object,
+        np.dtypes.StringDType(),
+        [("a", "i4"), ("b", "f8"), ("c", "S3")],
+        [("a", "i2"), ("n", [("x", "u1"), ("y", "f4")]), ("s", "i4", (2,))],
+        ">i4", ">f8", ">U3",
+    ])
+    def test_filled_default_is_the_zero_of_the_dtype(self, dtype):
         dt = np.dtype(dtype)
         a = np.zeros(3, dtype=dt)
+        # make the visible cells non-zero where the dtype allows it
+        if dt.kind in "iuf":
+            a += 7
         a.mask = np.array([False, True, False])
         f = a.filled()
         assert f.mask is None and f.dtype == dt
-        assert f[1:2].tobytes().hex() == expected
-        # only the hidden cell changed
+        assert f[1:2].tobytes() == np.zeros(1, dtype=dt).tobytes()
         assert f[0:1].tobytes() == a[0:1].tobytes()
         assert f[2:3].tobytes() == a[2:3].tobytes()
 
@@ -2040,74 +2036,28 @@ class TestMaskPythonSurface:
             a = np.array(vals, dtype=dt)
             a.mask = np.array([True] + [False] * (len(a) - 1))
             return a
-        f = masked([1., 2.], "f4").filled()
-        assert np.isnan(f[0]) and f[1] == 2.0
-        assert masked([1, 2], np.int32).filled()[0] == np.iinfo(np.int32).min
-        assert masked([1, 2], np.uint8).filled()[0] == 255
-        assert np.isnat(masked(["2020-01-01", "2021-01-01"], "M8[D]").filled()[0])
-        assert masked(["a", "bc"], "U3").filled()[0] == "\uffff" * 3
-        assert np.isnan(masked([1, 2], np.longdouble).filled()[0])
-        c = masked([1, 2], np.clongdouble).filled()[0]
-        assert np.isnan(c.real) and np.isnan(c.imag)
-
-    def test_filled_default_ordinary_nan_is_a_different_pattern(self):
-        a = np.array([np.nan, 1.0])
-        a.mask = np.array([True, False])
-        assert a.filled()[:1].tobytes() != np.array([np.nan])[:1].tobytes()
-
-    def test_filled_default_structured(self):
-        dt = np.dtype([("a", "i4"), ("b", "f8"), ("c", "S3")], align=True)
-        a = np.zeros(2, dtype=dt)
-        a.mask = np.array([True, False])
-        f = a.filled()
-        assert f[0]["a"] == np.iinfo(np.int32).min
-        assert np.isnan(f[0]["b"]) and f[0]["c"] == b"\xff\xff\xff"
-        assert f[1].tolist() == a[1].tolist()
-        # nested records and subarray fields are unrolled
-        dt = np.dtype([("a", "i2"), ("n", [("x", "u1"), ("y", "f4")]),
-                       ("s", "i4", (2,))])
-        a = np.zeros(2, dtype=dt)
-        a.mask = np.array([True, False])
-        f = a.filled()
-        assert f[0]["a"] == -32768 and f[0]["n"]["x"] == 255
-        assert np.isnan(f[0]["n"]["y"])
-        assert f[0]["s"].tolist() == [np.iinfo(np.int32).min] * 2
-
-    def test_filled_default_nonnative_byteorder(self):
-        a = np.array([1, 2], dtype=">i4")
-        a.mask = np.array([True, False])
-        f = a.filled()
-        assert f.dtype == a.dtype and f[0] == np.iinfo(np.int32).min
-        b = np.array([1.0, 2.0], dtype=">f8")
-        b.mask = np.array([True, False])
-        assert np.isnan(b.filled()[0])
-        u = np.array(["a", "bc"], dtype=">U3")
-        u.mask = np.array([True, False])
-        assert u.filled()[0] == "\uffff" * 3
-
-    @pytest.mark.parametrize("make", [
-        lambda: np.array([1, "a"], dtype=object),
-        lambda: np.array(["a", "b"], dtype=np.dtypes.StringDType()),
-    ])
-    def test_filled_default_rejected_dtypes(self, make):
-        a = make()
-        a.mask = np.array([True, False])
-        with pytest.raises(TypeError, match="fill_value"):
-            a.filled()
-        with pytest.raises(TypeError):
-            make().filled()                    # rejected even when unmasked
-        assert a.filled(a[1]).tolist() == [a[1], a[1]]   # an explicit value works
+        assert masked([1., 2.], "f4").filled().tolist() == [0.0, 2.0]
+        assert masked([1, 2], np.uint8).filled().tolist() == [0, 2]
+        assert masked([True, True], bool).filled().tolist() == [False, True]
+        assert masked(["a", "bc"], "U3").filled().tolist() == ["", "bc"]
+        assert masked([b"a", b"bc"], "S3").filled().tolist() == [b"", b"bc"]
+        assert masked([1 + 2j, 3j], complex).filled().tolist() == [0j, 3j]
+        assert masked([1, "x"], object).filled().tolist() == [0, "x"]
+        d = masked(["2020-01-01", "2021-01-01"], "M8[D]").filled()
+        assert str(d[0]) == "1970-01-01" and str(d[1]) == "2021-01-01"
+        s = masked([(1, 2.5), (3, 4.5)], [("a", "i4"), ("b", "f8")]).filled()
+        assert s.tolist() == [(0, 0.0), (3, 4.5)]
 
     def test_filled_default_unmasked_and_layouts(self):
         a = np.arange(6.).reshape(2, 3)
         f = a.filled()
         assert np.array_equal(f, a) and not np.shares_memory(f, a)
-        b = _mk(np.arange(12.).reshape(3, 4),
+        b = _mk(np.arange(1., 13.).reshape(3, 4),
                 np.arange(12).reshape(3, 4) % 3 == 0)
         for v in (b.T, b[::2], np.asfortranarray(b)):
             g = v.filled()
             assert g.mask is None
-            assert np.array_equal(np.isnan(g), v.mask)
+            assert np.array_equal(g == 0, v.mask)
 
     def test_filled_result_is_writable_and_independent(self):
         a = _mk([1, 2, 3], [0, 1, 0])

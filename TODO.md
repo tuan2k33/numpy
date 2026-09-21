@@ -61,7 +61,7 @@ New masked behaviour is tested in `numpy/_core/tests/test_mask.py`.
 | 7 | identical; widened gate (+ `test_function_base`, `test_arraysetops`, `test_index_tricks`, `test_shape_base`, `test_twodim_base`) 23466 passed, 151 skipped, 7 xfailed | 148 |
 | 8 | identical; whole suite 49348+ passed, 0 failed | 177 |
 | 9 | identical; whole suite 49419 passed, 1051 skipped, 57 xfailed, 1 xpassed; `numpy/linalg` 520 passed | 208 |
-| 10 | whole suite 49513 passed, 1052 skipped, 57 xfailed, 1 xpassed, 0 failed | 287 |
+| 10 | whole suite 49513 passed, 1052 skipped, 57 xfailed, 1 xpassed, 0 failed (also after the zero default) | 287 |
 
 Phase 10 cross-run against upstream (`origin/main` @ 84cd9b6d16, same test
 tree, both runs `-n 6`): upstream 49226 passed, fork 49513 (+287 = exactly
@@ -163,20 +163,16 @@ also rewrites `a`'s mask. New `PyArray_MaskOr` (always an ndarray, replaces
   to the visible width; the hidden value is never printed and is excluded from
   width/precision decisions; all dtypes, summarization, 0-d (`array(--)`),
   user formatters bypassed for hidden cells.
-- `ndarray.filled(fill_value=<default>)` (`methods.c`): new plain, unmasked,
-  writable copy; value assigned like `arr[i] = v`; validated even when
-  nothing is hidden; keeps subclass and layout. **Default (user decision,
-  2026-09-22): the NA pattern of [`LAYOUTS.md`](LAYOUTS.md)** (from the
-  `nulldtype` project): bool `0x02`, signed ints `INT_MIN`, unsigned ints
-  `UINT_MAX`, floats/complex the quiet NaN with every non-sign bit set (both
-  halves), datetime/timedelta `NaT`, `S`/`V` all `0xFF`, `U` U+FFFF per
-  character, structured per field (padding 0, nested records and subarray
-  fields unrolled), `longdouble`/`clongdouble` a NaN of their own dtype (no
-  double substitution, no warning). `object`, `StringDType`, unsized `S`/`U`/`V`
-  and user dtypes have no default (`TypeError`, even for an unmasked array); an
-  explicit value always works. Consequences: the bool default is an
-  out-of-range bool byte, and a hidden `uint8` becomes 255, an ordinary value.
-  `np.ma.filled` no longer mistakes the method for a masked array's.
+- `ndarray.filled(fill_value=0)` (`methods.c`): new plain, unmasked, writable
+  copy; the value is assigned like `arr[i] = v` and validated even when nothing
+  is hidden; keeps subclass and layout. **Default (user decision, 2026-09-22):
+  the zero of the dtype, as `np.zeros` builds it** (0, `False`, `''`, `b''`,
+  1970-01-01, all-zero records, `0` for object, `''` for `StringDType`), so
+  every dtype has a default and nothing raises. (First version used the NA
+  pattern of `LAYOUTS.md`; dropped: that table is for *missing* data, this
+  branch hides *known* data, and it produced an out-of-range bool byte and a
+  `uint8` 255.) `np.ma.filled` no longer mistakes the method for a masked
+  array's.
 - `isin`: hidden where `element` is hidden, and where `element` matches no
   *visible* test value while `test_elements` has a hidden cell.
 - Pickle: masked arrays add the mask as a sixth `__setstate__` item (unmasked
