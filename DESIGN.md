@@ -131,6 +131,10 @@ interfere with each other.
   destination's mask is read-only the assignment fails before the data is
   touched, never half-applied.
 
+- Structured dtypes: the mask has one bool per array element, i.e. it masks
+  whole *records*, not individual fields. Field views (`s["x"]`) currently do
+  not carry it; see "Known limitations" in TODO.md.
+
 ## Fail-open policy for unsupported operations
 
 While the feature is being built, an operation that has no mask support yet

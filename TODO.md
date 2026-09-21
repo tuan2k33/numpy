@@ -507,9 +507,9 @@ tests from scratch.
         (RSS + refcount of both the destination and the RHS mask, 40000
         iterations each, error paths included): flat.
   - **Still not carried after phase 6** (fail-open, see "Known limitations"):
-    structured-field assignment (`s["x"] = v`) leaves the element mask
-    unchanged; `a.flat = v` (whole-array flat assignment); scalar results
-    (`a[i]`, `a.flat[i]`) cannot carry a mask.
+    structured dtypes (mask is per record; field views and field assignment
+    do not carry/update it — see the table); `a.flat = v` (whole-array flat
+    assignment); scalar results (`a[i]`, `a.flat[i]`) cannot carry a mask.
 - [ ] **7 — Gather, scatter, and combine/split**
   - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
         merged, `HEAD..origin/main` is 0.
@@ -560,11 +560,11 @@ or regression. Every such gap must be listed here so it can be audited later.
 | Operation | What happens | Planned |
 |---|---|---|
 | `a.flat = v` (whole flat assignment, `getset.c`) | data assigned, mask left unchanged | phase 7 |
-| structured-field assignment `s["x"] = v` (`mapping.c`) | data assigned, element mask left unchanged | revisit |
+| structured dtypes (fields) | The mask is **per record** (one bool per array element), not per field; per-field masking (what `numpy.ma` does with a structured mask dtype) is out of scope. Consequences: field views `s["x"]` / `s[["x","y"]]` do **not** carry the record mask (a masked record is visible through the field view); `s["x"] = v` assigns the data and leaves the record mask unchanged. Whole-record operations (`s[i]` fancy/bool/slice, copy, sort, ...) work normally. | out of scope (revisit only if structured masking matters) |
 | assignment to a broadcast view with a read-only mask (`np.broadcast_arrays` results: data warns, mask is read-only) | fails before touching data | revisit |
 | `as_strided`/`sliding_window_view` with a stride that is not a whole number of elements, or a mask layout not proportional to the data | mask dropped | revisit (could conform the mask copy to the data layout) |
 | `astype` to a subarray dtype | raises a shape-mismatch `ValueError` (shape changes) | phase 8 |
-| 0-d/scalar results (`np.add.reduce(x)`, `x[0]`, ...) | mask dropped (scalars cannot carry one) | decide in phase 10 |
+| 0-d/scalar results (`np.add.reduce(x)`, `x[0]`, `.flat[i]`, ...) | mask dropped: NumPy decays a 0-d result to a scalar and scalars cannot carry a mask. Convention for now (keep the mask with `axis=`/`keepdims=True`) | open design question: keep a mask-carrying result as a 0-d array instead of decaying (only when a mask would be lost, so plain arrays are unaffected) |
 | where= with `out=None` or multi-output ufuncs | mask propagation skipped | revisit |
 | gufuncs (`matmul`, `linalg`) | mask dropped | phase 9 |
 
