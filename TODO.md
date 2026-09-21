@@ -138,8 +138,15 @@ Current focus:
     `test_defmatrix.py`.)
   - `test_mask.py`: 261 passed.
   - The per-file baseline rows (multiarray/indexing, umath group) are
-    subsumed by the whole-suite run; the fork-vs-upstream cross-run is
-    tracked separately.
+    subsumed by the whole-suite run.
+  - **Cross-run against upstream** (2026-09-22): the same test tree run on a
+    fresh build of `origin/main` @ 3526562baa (git worktree, `spin build`)
+    and on this branch, `pytest numpy -m "not slow" -n 6`, per-test outcomes
+    compared through junit XML. Upstream 49210 passed / 1052 skipped / 57
+    xfailed / 1 xpassed; fork 49471 passed (the +261 are exactly the
+    `test_mask.py` tests, nothing else) with identical skipped/xfailed/
+    xpassed counts. Common tests: 50320, **0 status differences**, 0 tests
+    missing on either side. Plain arrays behave identically to upstream.
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
