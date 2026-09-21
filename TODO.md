@@ -39,7 +39,7 @@ Current focus:
 - **Phase 7:** done (gather/scatter/combine, in-place mutator guards).
 - **Phase 8:** done (casting audit: `view(dtype)`, `np.array(ndmin=)`, `np.array([masked, ...])`, subarray `astype`).
 - **Phase 9:** done (contracting ops and `numpy.linalg`).
-- **Phase 10:** next — Python surface (repr, `filled()`, unique/isin, pickle, buffer).
+- **Phase 10:** done (repr/str, `ndarray.filled()`, `isin`, pickle, buffer/IO decisions; `unique` stays mask-blind by decision).
 - Phase 5 is complete (incl. `astype`/`flatten`/`diagonal`/`real`/`imag`); keep the cross-test, design review, NEP review, and
   plain-array baseline as the gate for every change.
 
@@ -126,6 +126,20 @@ Current focus:
   - Whole suite (`pytest numpy -m "not slow" -n 4`, with `PYTHONPATH`):
     49419 passed, 1051 skipped, 57 xfailed, 1 xpassed, 0 failed.
   - `test_mask.py`: 208 passed.
+
+- **Phase 10 — Python surface (repr, `filled`, pickle, `isin`)**
+  - Merged upstream first (8 commits, clean; behind 0).
+  - Whole suite (`pytest numpy -m "not slow" -n 4`, with `PYTHONPATH`):
+    49472 passed, 1051 skipped, 57 xfailed, 1 xpassed, 0 failed.
+    Without `numpy/ma`: 45038 passed, 1051 skipped, 55 xfailed, 1 xpassed,
+    0 failed. (First run had 20 failures: the new `ndarray.filled` was picked
+    up by `np.ma.filled`'s `hasattr(a, 'filled')` duck-typing and by the
+    matrix "call every method" test; fixed in `ma/core.py` and
+    `test_defmatrix.py`.)
+  - `test_mask.py`: 261 passed.
+  - The per-file baseline rows (multiarray/indexing, umath group) are
+    subsumed by the whole-suite run; the fork-vs-upstream cross-run is
+    tracked separately.
 
 Add one row per phase from here on, run against the same two files at
 minimum (more as later phases touch more test files per the mapping table
@@ -691,18 +705,50 @@ tests from scratch.
         einsum incl. list form/`optimize`/`out`, correlate/convolve all modes,
         every linalg function above, stacks, subclass-with-own-`mask`).
         RSS + refcount leak check (3000 iterations incl. error paths): flat.
-- [ ] **10 — Python-level surface**
-  - [ ] Sync upstream first (standing rule in Housekeeping): `origin/main`
-        merged, `HEAD..origin/main` is 0.
-  - [ ] `numpy/_core/arrayprint.py` (repr/str show masked cells)
-  - [ ] Explicit `filled(fill_value)` (e.g. `a.filled(np.nan)`) to get a
-        plain array with the masked cells replaced — the user's choice, never
-        applied automatically (see the scalar convention in "Known
-        limitations").
-  - [ ] `numpy/lib/_arraysetops_impl.py` (`unique`/`isin` mask-awareness)
-  - [ ] `multiarray/methods.c` (`__reduce__`/pickle, `tobytes`/`tofile`)
-  - [ ] `multiarray/buffer.c` (buffer protocol — decide: expose data only,
-        or refuse when masked)
+- [x] **10 — Python-level surface**
+  - [x] Sync upstream first (standing rule in Housekeeping): `origin/main`
+        merged (8 commits, clean), `HEAD..origin/main` is 0.
+  - [x] `numpy/_core/arrayprint.py` (repr/str show masked cells): a hidden
+        cell prints as `--` (right-aligned to the width of the visible
+        cells), the hidden *value* is never printed, and it takes no part in
+        the width/precision decisions (formatters are built from the visible
+        cells only). Works for every dtype incl. structured/datetime/object/
+        string, summarized output, 0-d (`array(--)`, `str` -> `--`), all-hidden
+        and empty arrays, `array2string` options/`formatter` (hidden cells
+        bypass user formatters), subclasses (`np.matrix`). Unmasked arrays take
+        the old path untouched. Read through the base-class descriptor
+        (`ndarray.mask.__get__`), so `numpy.ma` is unaffected.
+  - [x] Explicit `filled(fill_value)`: new C method `ndarray.filled` in
+        `methods.c` (`array_filled`): a new plain, unmasked, writable copy
+        with hidden cells assigned `fill_value` (same conversion as
+        `arr[i] = fill_value`, so `a.filled(np.nan)` on an int array raises;
+        the value is validated even when nothing is hidden). Never a view,
+        keeps the subclass and layout, `fill_value` is required (no implicit
+        default). Docs in `_add_newdocs.py`, stub in `__init__.pyi`.
+  - [x] `numpy/lib/_arraysetops_impl.py`: `isin` is mask-aware (rule below).
+        `unique` and the set operations built on it (`intersect1d`,
+        `setxor1d`, `union1d`, `setdiff1d`, `unique_*`) stay **mask-blind by
+        decision** (user, 2026-09-21): they run on the whole data and return
+        plain arrays; hidden values can show up in the result.
+  - [x] `multiarray/methods.c` (`__reduce__`/pickle): a masked array pickles
+        its mask as a sixth state item (unmasked arrays keep the exact
+        5-item state, so their pickles are byte-identical and readable by any
+        NumPy; a *masked* pickle needs this build). `__setstate__` validates
+        the mask (bool ndarray of the array's shape, no mask of its own) and
+        replaces any mask already on the object. Protocol 5 with a masked
+        array uses the regular (in-band) reduce, since the `PickleBuffer`
+        reconstruction has nowhere to carry a mask. Fixed while testing: the
+        first failed `PyArg_ParseTuple` left its exception set when the
+        fallback parse succeeded (`SystemError` on every 5-item state).
+  - [x] `multiarray/buffer.c`, `tobytes`/`tofile`/`np.save`/`savetxt`/
+        `tolist`: **decided (user): export the data only** — the raw values of
+        hidden cells included, no mask — nothing to change in the code
+        (fail-open, keeps `frombuffer`/`PickleBuffer`/third-party buffer
+        consumers working). Use `filled()` first to export replacement values.
+        `test_buffer_and_io_export_data_only` pins this.
+  - Verification: see the phase 10 row in "Regression baseline"; RSS +
+    refcount loop over pickle/unpickle (incl. rejected masks), `filled`
+    (object marker), repr/str, `isin` (3300 iterations): flat.
 
 No separate benchmarking or final testing phase is tracked here. The
 cross-test requirement in the housekeeping section is the per-phase gate:
@@ -711,7 +757,7 @@ plain-array baseline to confirm no masked-path or no-mask regression.
 
 ## Note / known limitation
 
-### Known limitations (fail-open) — check before closing phase 10
+### Known limitations (fail-open) — audited at the close of phase 10
 
 Policy (see `DESIGN.md`): an operation without mask support behaves exactly
 like it does for a plain array — the mask is dropped, nothing raises. This is
@@ -726,7 +772,11 @@ or regression. Every such gap must be listed here so it can be audited later.
 | assignment to a broadcast view with a read-only mask (`np.broadcast_arrays` results: data warns, mask is read-only) | fails before touching data | revisit |
 | `as_strided`/`sliding_window_view` with a stride that is not a whole number of elements, or a mask layout not proportional to the data | mask dropped | revisit (could conform the mask copy to the data layout) |
 | `a[...] = [masked, ...]` (list/tuple RHS with masked arrays in a slice/int/ellipsis assignment) | data assigned, masks inside the list ignored (that path is the public `PyArray_CopyObject`, which has no mask hook). `a[...] = np.array([masked, ...])` carries them | revisit (route through `PyArray_FromAny` when the destination or a leaf is masked) |
-| `np.frombuffer`/buffer protocol, `getfield`, `__array_wrap__(x)` | result has no mask (the buffer/field view has no owner-mask relation) | phase 10 (buffer protocol); `getfield` follows the structured limitation |
+| `np.frombuffer`, `getfield`, `__array_wrap__(x)` | result has no mask (the buffer/field view has no owner-mask relation) | by design; `getfield` follows the structured limitation |
+| Buffer protocol, `tobytes`, `tofile`, `np.save`/`savetxt`, `tolist`, `memoryview` of a masked array | **Decided (user, phase 10): data only.** The raw data, hidden cells' values included, is exported and no mask travels with it (a saved/loaded array is unmasked). Pickle *does* carry the mask; use `filled()` before exporting replacement values | by design |
+| `np.unique` (+ `return_index/inverse/counts`), `unique_*`, `intersect1d`, `setxor1d`, `union1d`, `setdiff1d` | **Decided (user, phase 10): mask-blind.** They flatten and de-duplicate, so no per-element mask relation exists; they run on the whole data and return plain arrays, hidden values included | by design |
+| `np.isin(element, test_elements)` | mask follows the rule "hidden iff a hidden input can change the answer": hidden where `element` is hidden, and where `element` matches no *visible* test value while `test_elements` has a hidden cell (a hidden cell might have matched). A match against a visible value is a certain hit. Hidden test values are never compared as if they were known | none |
+| Pickle of a masked array | 6-item `__setstate__` state (the sixth is the mask): reading it needs this build (older NumPy errors instead of silently dropping the mask); protocol 5 uses the in-band reduce for masked arrays, so no out-of-band buffers | by design |
 | `view(dtype)` with a different itemsize on a masked array | raises `ValueError` (the last axis changes; no mask view describes it) | by design; `astype()` |
 | `np.array(list_of_masked, dtype=object, ndmax=k)` with `ndmax` smaller than the depth | the masked arrays become *object elements* of the result, so the result has no mask (by construction, nothing per-element to mask); without `ndmax`, `dtype=object` carries the mask | by design |
 | 0-d/scalar results (`np.add.reduce(x)`, `x.sum()`, `x.max()`, `x[0]`, `.flat[i]`, elementwise ufuncs on 0-d, ...) | **Convention (decided): a scalar carries no mask.** NumPy decays a 0-d result to a scalar and scalars cannot carry one, so the mask is dropped there. Keep it with `axis=`, `keepdims=True` or `out=` (a 0-d `out` array keeps its mask). Reduce path: `PyUFunc_Reduce` returns a 0-d ndarray, `_propagate_reduce_mask` attaches the mask to it, then `npy_apply_wrap(..., return_scalar)` decays it to a scalar. Elementwise path: the 0-d result is decayed inside `ufunc_generic_fastcall`, before mask propagation runs. Not chosen: NaN-for-masked (float-only, destroys the value, conflates masked with invalid/missing); retaining a 0-d result (would be a one-line `return_scalar &= mask == NULL` on the reduce path plus a re-wrap on the elementwise path) | **Final (user decision, 2026-09-21, after phase 9): every scalar-producing operation stays a plain scalar and loses the mask** — reductions, `x[i]`, `det`/`norm`/`trace`, `v @ v`, `vdot`, ... No 0-d retention, no masked scalar type, no NaN sentinel. Consequence to remember: e.g. `np.linalg.det(m)` of a matrix with a hidden cell returns an ordinary number. Use `axis=`/`keepdims=True`/`out=` to keep a mask, or `filled(fill_value)` (phase 10) to get an explicit plain array. Not to be re-opened unless the user asks |

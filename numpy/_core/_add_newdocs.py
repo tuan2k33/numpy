@@ -3888,6 +3888,41 @@ _array_method_doc('fill', "value",
     array([3, 3], dtype=object)
     """)
 
+# `filled` is an `ndarray` method only (scalars carry no mask).
+_filled_doc = _METHOD_DOC_TEMPLATE.format(
+    name="filled", params="$self, /, fill_value",
+    doc=textwrap.dedent("""
+    a.filled(fill_value)
+
+    Return a plain copy of the array with the masked elements replaced.
+
+    The array itself is left untouched (masking never changes the data), and
+    the result carries no mask. `fill_value` is assigned like
+    ``a[i] = fill_value``, so it must be representable in the dtype of `a`.
+    An array without a mask is simply copied.
+
+    Parameters
+    ----------
+    fill_value : scalar
+        Value stored in place of every masked element.
+
+    Returns
+    -------
+    filled_array : ndarray
+        A new, unmasked array of the same shape and dtype.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> a = np.array([1.0, 2.0, 3.0])
+    >>> a.mask = np.array([False, True, False])
+    >>> a.filled(np.nan)
+    array([ 1., nan,  3.])
+    >>> a.mask
+    array([False,  True, False])
+""").strip())
+add_newdoc("numpy._core.multiarray", "ndarray", ("filled", _filled_doc))
+
 _array_method_doc('flatten', "order='C'",
     """
     a.flatten(order='C')

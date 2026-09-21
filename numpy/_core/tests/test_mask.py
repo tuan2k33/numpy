@@ -1884,3 +1884,353 @@ class TestMaskLinalg:
             mask = "unrelated"
         a = np.eye(3).view(Sub)
         assert (a @ a).mask == "unrelated"
+
+
+def _mk(values, mask, dtype=None):
+    a = np.array(values, dtype=dtype)
+    a.mask = np.array(mask, dtype=bool)
+    return a
+
+
+class TestMaskPythonSurface:
+    """Phase 10: repr/str, filled(), pickle, isin, buffer/IO (data only)."""
+
+    # -- repr / str -------------------------------------------------------
+
+    def test_repr_and_str_show_hidden_cells(self):
+        a = _mk([[0, 1, 2], [3, 4, 5]], [[0, 1, 0], [1, 0, 0]], np.int32)
+        assert repr(a) == ("array([[0, --, 2],\n"
+                           "       [--, 4, 5]], dtype=int32)")
+        assert str(a) == "[[0 -- 2]\n [-- 4 5]]"
+
+    def test_hidden_values_never_printed(self):
+        a = _mk([123456, 7, 8], [1, 0, 0])
+        assert "123456" not in repr(a)
+        assert "123456" not in str(a)
+        assert "123456" not in np.array2string(a)
+
+    def test_hidden_cells_do_not_affect_widths(self):
+        a = _mk([1e9, 1.5, 2.25], [1, 0, 0])
+        b = np.array([1.5, 2.25])
+        # same text as the visible cells alone, plus the aligned placeholder
+        assert str(a).replace(" ", "") == "[--1.52.25]"
+        assert str(b).replace(" ", "") == "[1.52.25]"
+
+    @pytest.mark.parametrize("values, dtype", [
+        ([True, False, True], None),
+        ([1 + 2j, 3 - 1j, 0j], None),
+        (["ab", "c", "def"], None),
+        ([b"ab", b"c", b"d"], None),
+        (["2020-01-01", "NaT", "2021-05-06"], "M8[D]"),
+        ([1, 2, 3], "m8[s]"),
+        ([1.5, 2.5, 3.5], np.float32),
+        ([1, "a", None], object),
+    ])
+    def test_repr_all_dtypes(self, values, dtype):
+        a = _mk(values, [0, 1, 0], dtype)
+        assert "--" in repr(a)
+        assert str(a).count("--") == 1
+
+    def test_repr_structured(self):
+        s = _mk([(1, 2.5), (3, 4.5), (5, 6.5)], [0, 1, 0],
+                [("a", "i4"), ("b", "f8")])
+        assert str(s).count("--") == 1
+        assert "(3, 4.5)" not in repr(s)
+
+    def test_repr_all_hidden_empty_and_0d(self):
+        assert str(_mk([1.0, 2.0], [1, 1])) == "[-- --]"
+        z = np.array(3)
+        z.mask = np.array(True)
+        assert repr(z) == "array(--)"
+        assert str(z) == "--"
+        assert str(np.array(3)) == "3"
+        e = np.zeros((0, 3))
+        e.mask = np.zeros((0, 3), bool)
+        assert repr(e) == repr(np.zeros((0, 3)))
+
+    def test_repr_summarized(self):
+        a = np.arange(2000.).reshape(2, 1000)
+        m = np.zeros((2, 1000), bool)
+        m[0, 0] = m[1, 999] = True
+        m[0, 500] = True        # hidden but inside the elided part
+        a.mask = m
+        text = repr(a)
+        assert "..." in text
+        assert text.count("--") == 2
+
+    def test_repr_options(self):
+        a = _mk([1.0, 2.0, 3.0], [0, 1, 0])
+        assert np.array2string(a, separator=", ") == "[1., --, 3.]"
+        assert (np.array2string(a, formatter={"float_kind": lambda x: f"<{x}>"})
+                == "[<1.0>    -- <3.0>]")
+        with np.printoptions(threshold=2, edgeitems=1):
+            assert repr(a) == "array([1., ..., 3.], shape=(3,))"
+
+    def test_repr_subclass_and_unmasked_unchanged(self):
+        m = np.matrix([[1, 2], [3, 4]])
+        m.mask = np.array([[False, True], [False, False]])
+        assert repr(m) == "matrix([[1, --],\n        [3, 4]])"
+        assert repr(np.arange(3)) == "array([0, 1, 2])"
+
+    def test_repr_leaves_array_alone(self):
+        a = _mk([1, 2, 3], [0, 1, 0])
+        before = a.mask.copy()
+        repr(a)
+        str(a)
+        assert np.array_equal(a.mask, before)
+        assert np.array_equal(a.filled(0), [1, 0, 3])
+
+    def test_subclass_with_own_mask_attribute(self):
+        class Sub(np.ndarray):
+            mask = "unrelated"
+        a = np.arange(3).view(Sub)
+        assert str(a) == "[0 1 2]"
+
+    def test_repr_no_refcount_leak(self):
+        import sys
+        a = _mk([1, 2, 3], [0, 1, 0])
+        m = np.ndarray.mask.__get__(a)
+        base = sys.getrefcount(m)
+        for _ in range(200):
+            repr(a)
+            str(a)
+        assert sys.getrefcount(m) == base
+
+    # -- filled() ---------------------------------------------------------
+
+    def test_filled_basic(self):
+        a = _mk([1.0, 2.0, 3.0], [0, 1, 0])
+        f = a.filled(np.nan)
+        assert np.array_equal(f, [1.0, np.nan, 3.0], equal_nan=True)
+        assert f.mask is None
+        assert not np.shares_memory(f, a)
+        # non-destructive: the array keeps its data and its mask
+        assert np.array_equal(np.asarray(a).view(np.ndarray)[1], 2.0)
+        assert np.array_equal(a.mask, [False, True, False])
+
+    def test_filled_result_is_writable_and_independent(self):
+        a = _mk([1, 2, 3], [0, 1, 0])
+        f = a.filled(0)
+        f[0] = 99
+        assert a[0] == 1
+
+    def test_filled_unmasked_is_a_copy(self):
+        a = np.arange(3)
+        f = a.filled(-1)
+        assert np.array_equal(f, a) and not np.shares_memory(f, a)
+
+    def test_filled_keyword_and_errors(self):
+        a = _mk([1, 2, 3], [0, 1, 0])
+        assert np.array_equal(a.filled(fill_value=7), [1, 7, 3])
+        with pytest.raises(TypeError):
+            a.filled()
+        with pytest.raises(ValueError):
+            a.filled(np.nan)                   # not representable as int
+        with pytest.raises(ValueError):
+            np.arange(3).filled(np.nan)        # validated even without a mask
+        with pytest.raises(OverflowError):
+            _mk(np.arange(3, dtype=np.int8), [1, 0, 0]).filled(1000)
+
+    def test_filled_dtypes(self):
+        assert list(_mk([True, False], [1, 0]).filled(True)) == [True, False]
+        assert list(_mk(["a", "bb"], [1, 0]).filled("zz")) == ["zz", "bb"]
+        assert list(_mk([1, 2], [1, 0], object).filled(None)) == [None, 2]
+        s = _mk([(1, 2.5), (3, 4.5)], [0, 1], [("a", "i4"), ("b", "f8")])
+        assert s.filled((0, 0.0)).tolist() == [(1, 2.5), (0, 0.0)]
+        d = _mk(["2020-01-01", "2021-01-01"], [1, 0], "M8[D]")
+        assert str(d.filled(np.datetime64("NaT", "D"))[0]) == "NaT"
+
+    def test_filled_layouts(self):
+        a = _mk(np.arange(12.).reshape(3, 4), np.arange(12).reshape(3, 4) % 3 == 0)
+        for view in (a.T, a[::2], a[:, ::-1], np.asfortranarray(a)):
+            f = view.filled(-1.0)
+            assert f.shape == view.shape and f.mask is None
+            assert np.array_equal(f == -1.0, view.mask)
+        z = np.array(1.0)
+        z.mask = np.array(True)
+        r = z.filled(5.0)
+        assert r.shape == () and r == 5.0 and r.mask is None
+
+    def test_filled_keeps_subclass(self):
+        m = np.matrix([[1, 2], [3, 4]])
+        m.mask = np.array([[False, True], [False, False]])
+        f = m.filled(0)
+        assert type(f) is np.matrix and f.tolist() == [[1, 0], [3, 4]]
+
+    def test_ma_filled_ignores_the_ndarray_method(self):
+        # `np.ma.filled` duck-types on a `filled` attribute; plain arrays now
+        # have one with a different meaning and must still pass through
+        a = np.arange(3)
+        assert np.ma.filled(a, 99) is a
+        m = np.ma.masked_array([1, 2, 3], mask=[0, 1, 0])
+        assert np.ma.filled(m, 99).tolist() == [1, 99, 3]
+
+    def test_filled_no_refcount_leak(self):
+        import sys
+        a = _mk([1, 2, 3], [0, 1, 0], object)
+        marker = object()
+        base = sys.getrefcount(marker)
+        for _ in range(200):
+            a.filled(marker)
+        assert sys.getrefcount(marker) == base
+
+    # -- pickle / copy ----------------------------------------------------
+
+    @pytest.mark.parametrize("protocol", range(6))
+    def test_pickle_roundtrip_keeps_mask(self, protocol):
+        import pickle
+        a = _mk(np.arange(12.).reshape(3, 4),
+                np.arange(12).reshape(3, 4) % 3 == 0)
+        r = pickle.loads(pickle.dumps(a, protocol))
+        assert np.array_equal(r, a)
+        assert np.array_equal(r.mask, a.mask)
+        assert r.mask is not a.mask
+        r.mask[1, 1] = True                     # the copy is independent
+        assert not a.mask[1, 1]
+
+    @pytest.mark.parametrize("make", [
+        lambda a: np.asfortranarray(a),
+        lambda a: a[:, ::2],
+        lambda a: a.T,
+        lambda a: a[::-1],
+        lambda a: a[1],
+    ])
+    def test_pickle_views_and_layouts(self, make):
+        import pickle
+        a = _mk(np.arange(12.).reshape(3, 4),
+                np.arange(12).reshape(3, 4) % 3 == 0)
+        v = make(a)
+        for protocol in (2, 5):
+            r = pickle.loads(pickle.dumps(v, protocol))
+            assert np.array_equal(r, v)
+            assert np.array_equal(r.mask, v.mask)
+
+    def test_pickle_special_dtypes(self):
+        import pickle
+        for a in (_mk([1, "a", None], [0, 1, 0], object),
+                  _mk([(1, 2.5), (3, 4.5)], [0, 1], [("a", "i4"), ("b", "f8")]),
+                  _mk(["x", "yy"], [1, 0]),
+                  _mk(np.array([1, 2], ">i4"), [0, 1])):
+            for protocol in (2, 5):
+                r = pickle.loads(pickle.dumps(a, protocol))
+                # (a big-endian array comes back native, as without a mask)
+                assert r.dtype == a.dtype.newbyteorder("=")
+                assert r.tolist() == a.tolist()
+                assert np.array_equal(r.mask, a.mask)
+        z = np.array(3)
+        z.mask = np.array(True)
+        assert pickle.loads(pickle.dumps(z)).mask == True  # noqa: E712
+        e = np.zeros((0, 3))
+        assert pickle.loads(pickle.dumps(e)).mask is None
+
+    def test_pickle_subclass(self):
+        import pickle
+        m = np.matrix([[1, 2], [3, 4]])
+        m.mask = np.array([[False, True], [False, False]])
+        r = pickle.loads(pickle.dumps(m, 5))
+        assert type(r) is np.matrix and np.array_equal(r.mask, m.mask)
+
+    def test_pickle_unmasked_format_unchanged(self):
+        a = np.arange(4)
+        state = a.__reduce__()[2]
+        assert len(state) == 5
+        assert len(a.filled(0).__reduce__()[2]) == 5
+        m = _mk([1, 2], [0, 1])
+        assert len(m.__reduce__()[2]) == 6
+        # protocol 5 out-of-band buffers are only used for unmasked arrays
+        assert m.__reduce_ex__(5)[0] is m.__reduce__()[0]
+        assert a.__reduce_ex__(5)[0] is not a.__reduce__()[0]
+
+    def test_setstate_validates_the_mask(self):
+        a = _mk([1, 2, 3], [0, 1, 0])
+        good = a.__reduce__()[2]
+        b = np.empty(0)
+        b.__setstate__(good)
+        assert np.array_equal(b.mask, a.mask)
+        for bad in (np.zeros(2, bool), np.zeros(3, int), [False, True, False]):
+            with pytest.raises((TypeError, ValueError)):
+                np.empty(0).__setstate__(good[:5] + (bad,))
+        # an old 5-item state still loads and clears any mask already there
+        c = _mk([9, 9], [1, 0])
+        c.__setstate__(np.arange(3).__reduce__()[2])
+        assert c.mask is None and c.shape == (3,)
+
+    def test_copy_and_deepcopy_keep_mask(self):
+        import copy
+        a = _mk([1, 2, 3], [0, 1, 0])
+        for c in (copy.copy(a), copy.deepcopy(a), a.copy()):
+            assert np.array_equal(c.mask, a.mask) and c.mask is not a.mask
+
+    # -- isin -------------------------------------------------------------
+
+    def test_isin_element_mask_follows(self):
+        e = _mk([[1, 2, 3], [4, 5, 6]], [[0, 1, 0], [0, 0, 0]])
+        r = np.isin(e, [1, 4])
+        assert r.tolist() == [[True, False, False], [True, False, False]]
+        assert np.array_equal(r.mask, e.mask)
+        r = np.isin(e, [1, 4], invert=True)
+        assert np.array_equal(r.mask, e.mask)
+        assert np.isin(np.array(3), [3]).mask is None
+
+    def test_isin_hidden_test_values(self):
+        e = np.array([1, 2, 3, 4])
+        t = _mk([1, 4, 9], [0, 0, 1])
+        r = np.isin(e, t)
+        # 1 and 4 match a visible value (certain); 2 and 3 might match the hidden one
+        assert np.array_equal(r.mask, [False, True, True, False])
+        assert r.tolist() == [True, False, False, True]
+        r2 = np.isin(e, t, invert=True)
+        assert np.array_equal(r2.mask, r.mask)
+        # a test value hidden nowhere: no mask at all
+        assert np.isin(e, _mk([1, 4, 9], [0, 0, 0])).mask is None
+
+    @pytest.mark.parametrize("kind", [None, "sort", "table"])
+    def test_isin_matches_bruteforce(self, kind):
+        rng = np.random.default_rng(5)
+        for _ in range(100):
+            el = rng.integers(0, 6, (3, 4))
+            tt = rng.integers(0, 6, 5)
+            em = rng.random((3, 4)) < 0.3
+            tm = rng.random(5) < 0.3
+            r = np.isin(_mk(el, em), _mk(tt, tm), kind=kind)
+            expect = em | (~np.isin(el, tt[~tm]) & tm.any())
+            got = np.zeros(el.shape, bool) if r.mask is None else r.mask
+            assert np.array_equal(got, expect)
+            assert np.array_equal(np.asarray(r).view(np.ndarray), np.isin(el, tt))
+
+    def test_isin_plain_unchanged(self):
+        r = np.isin(np.arange(5), [1, 2])
+        assert r.mask is None
+        assert np.isin([1, 2], {1}).tolist() == [False, False]
+
+    # -- unique / set operations: mask-blind (documented) -----------------
+
+    def test_unique_is_mask_blind(self):
+        a = _mk([3, 1, 3, 2, 1], [1, 0, 0, 1, 0])
+        u = np.unique(a)
+        assert u.tolist() == [1, 2, 3] and u.mask is None
+        _, idx, inv, cnt = np.unique(a, return_index=True, return_inverse=True,
+                                     return_counts=True)
+        assert idx.tolist() == [1, 3, 0] and cnt.tolist() == [2, 1, 2]
+
+    # -- buffer protocol / IO: data only (documented) ---------------------
+
+    def test_buffer_and_io_export_data_only(self):
+        import io
+        a = _mk(np.arange(4, dtype=np.int32), [0, 1, 0, 0])
+        plain = np.arange(4, dtype=np.int32)
+        assert a.tobytes() == plain.tobytes()
+        assert bytes(memoryview(a)) == plain.tobytes()
+        assert np.frombuffer(a, dtype=np.int32).mask is None
+        buf = io.BytesIO()
+        np.save(buf, a)
+        buf.seek(0)
+        loaded = np.load(buf)
+        assert loaded.mask is None and np.array_equal(loaded, plain)
+        assert a.tolist() == plain.tolist()
+
+    def test_tofile_exports_data_only(self, tmp_path):
+        a = _mk(np.arange(4, dtype=np.int32), [0, 1, 0, 0])
+        path = tmp_path / "a.bin"
+        a.tofile(path)
+        assert path.read_bytes() == np.arange(4, dtype=np.int32).tobytes()

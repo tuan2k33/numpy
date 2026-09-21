@@ -1073,9 +1073,44 @@ def isin(element, test_elements, assume_unique=False, invert=False, *,
     array([[False,  True],
            [ True, False]])
     """
-    element = np.asarray(element)
-    return _isin(element, test_elements, assume_unique=assume_unique,
-                 invert=invert, kind=kind).reshape(element.shape)
+    element, element_mask = _split_mask(element)
+    tests, tests_mask = (_split_mask(test_elements)
+                         if isinstance(test_elements, np.ndarray)
+                         else (test_elements, None))
+    result = _isin(element, tests, assume_unique=assume_unique,
+                   invert=invert, kind=kind).reshape(element.shape)
+    if element_mask is None and tests_mask is None:
+        return result
+
+    # Masked input: an answer is hidden where `element` is hidden, and where
+    # it is not certain that no hidden test value equals the element (an
+    # element that matches a visible test value is a certain hit).
+    hidden = element_mask
+    if tests_mask is not None and tests_mask.any():
+        visible = tests.ravel()[~tests_mask.ravel()]
+        certain = _isin(element, visible, assume_unique=assume_unique,
+                        kind=kind).reshape(element.shape)
+        unsure = ~certain
+        hidden = unsure if hidden is None else hidden | unsure
+    if hidden is not None:
+        _set_mask(result, np.array(hidden))
+    return result
+
+
+# The built-in mask, through the base-class descriptor: a subclass may define
+# its own, unrelated `mask` (numpy.ma).
+_get_mask = np.ndarray.mask.__get__
+_set_mask = np.ndarray.mask.__set__
+
+
+def _split_mask(x):
+    """`(x as a plain, unmasked array, its mask or None)`."""
+    x = np.asarray(x)
+    mask = _get_mask(x)
+    if mask is not None:
+        x = x.view()
+        _set_mask(x, None)
+    return x, mask
 
 
 def _union1d_dispatcher(ar1, ar2):

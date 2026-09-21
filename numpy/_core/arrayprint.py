@@ -53,6 +53,14 @@ from .overrides import array_function_dispatch, set_module
 from .printoptions import format_options
 from .umath import absolute, isfinite, isinf, isnat
 
+# The built-in mask, through the base-class descriptor: a subclass may define
+# its own, unrelated `mask` (numpy.ma).
+_get_mask = ndarray.mask.__get__
+_set_mask = ndarray.mask.__set__
+
+# How a hidden (masked) element is printed.
+_MASKED_STR = "--"
+
 
 def _make_options_dict(precision=None, threshold=None, edgeitems=None,
                        linewidth=None, suppress=None, nanstr=None, infstr=None,
@@ -601,6 +609,38 @@ def _recursive_guard(fillvalue='...'):
     return decorating_function
 
 
+class _MaskedCells:
+    """Indexable view for `_formatArray` that yields `_HIDDEN` for masked cells.
+
+    `_formatArray` only needs `shape`, `ndim` and `a[index]`.
+    """
+    __slots__ = ("data", "mask", "shape", "ndim", "size")
+
+    def __init__(self, data, mask):
+        self.data = data
+        self.mask = mask
+        self.shape = data.shape
+        self.ndim = data.ndim
+        self.size = data.size
+
+    def __getitem__(self, index):
+        return _HIDDEN if self.mask[index] else self.data[index]
+
+
+_HIDDEN = object()
+
+
+def _masked_format_function(format_function, visible):
+    """Wrap `format_function` so hidden cells print as `--`, right-aligned to
+    the width of the visible ones (number formatters pad to a common width)."""
+    width = len(format_function(visible[0])) if visible.size else 0
+    hidden = _MASKED_STR.rjust(width)
+
+    def format_cell(x):
+        return hidden if x is _HIDDEN else format_function(x)
+    return format_cell
+
+
 # gracefully handle recursive calls, when object arrays contain themselves
 @_recursive_guard()
 def _array2string(a, options, separator=' ', prefix=""):
@@ -611,14 +651,30 @@ def _array2string(a, options, separator=' ', prefix=""):
     if a.shape == ():
         a = data
 
+    mask = _get_mask(data)
+    if mask is not None:
+        # Masked (hidden) elements print as `--` and take no part in the
+        # formatting decisions (widths, precision) made from the data. `data`
+        # becomes an unmasked view so the helpers below see plain values.
+        data = data.view()
+        _set_mask(data, None)
+        a = _MaskedCells(data, mask)
+
     if a.size > options['threshold']:
         summary_insert = "..."
         data = _leading_trailing(data, options['edgeitems'])
+        if mask is not None:
+            mask = _leading_trailing(mask, options['edgeitems'])
     else:
         summary_insert = ""
 
     # find the right formatting function for the array
-    format_function = _get_format_function(data, **options)
+    if mask is None:
+        format_function = _get_format_function(data, **options)
+    else:
+        visible = data[~mask]
+        format_function = _masked_format_function(
+            _get_format_function(visible, **options), visible)
 
     # skip over "["
     next_line_prefix = " "
@@ -1726,6 +1782,8 @@ def _array_str_implementation(
     # so floats are not truncated by `precision`, and strings are not wrapped
     # in quotes. So we return the str of the scalar value.
     if a.shape == ():
+        if isinstance(a, ndarray) and _get_mask(a) is not None:
+            return _MASKED_STR
         # obtain a scalar and call str on it, avoiding problems for subclasses
         # for which indexing with () returns a 0d instead of a scalar by using
         # ndarray's getindex. Also guard against recursive 0d object arrays.

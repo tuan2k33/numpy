@@ -154,6 +154,17 @@ interfere with each other.
   NaN or any other sentinel: hiding is non-destructive, and an explicit
   `filled()` (phase 10) is how a user asks for replacement values.
 
+- Python-level surface (phase 10). `repr`/`str` print a hidden cell as `--`
+  and never its value; hidden cells are left out of width/precision
+  decisions. `ndarray.filled(fill_value)` is the one explicit way to get
+  replacement values: it returns a new plain, unmasked copy and never
+  changes the array. Pickle carries the mask (extra state item; unmasked
+  pickles are unchanged). The buffer protocol, `tobytes`/`tofile`/`np.save`
+  and `tolist` export the data only, hidden values included, no mask.
+  `isin` hides an answer when a hidden value could have changed it;
+  `unique` and the set operations are deliberately mask-blind (they
+  flatten and de-duplicate, so no per-element relation exists).
+
 - Gather and combine operations (`take`, `repeat`, `choose`, `where`,
   `concatenate` and everything built on them) run the identical operation on
   the mask. Where a data input steers the result (`np.where`'s condition,

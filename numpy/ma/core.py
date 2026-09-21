@@ -687,7 +687,10 @@ def filled(a, fill_value=None):
            [6, 7, 8]])
 
     """
-    if hasattr(a, 'filled'):
+    # (`ndarray.filled` is the built-in mask's method, with another meaning:
+    # only objects with their own `filled` are treated as masked arrays here)
+    if (hasattr(a, 'filled')
+            and getattr(type(a), 'filled', None) is not ndarray.filled):
         return a.filled(fill_value)
 
     elif isinstance(a, ndarray):

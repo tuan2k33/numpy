@@ -283,6 +283,7 @@ class TestMatrixReturn:
             'reshape': (1,),
             'swapaxes': (0, 0),
             'dot': np.array([1.0]),
+            'filled': (0.0,),
             }
         excluded_methods = [
             'argmin', 'choose', 'dump', 'dumps', 'fill', 'getfield',

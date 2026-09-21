@@ -1226,6 +1226,56 @@ array_copy_keeporder(PyArrayObject *self, PyObject *NPY_UNUSED(ignored))
     return PyArray_NewCopy(self, NPY_KEEPORDER);
 }
 
+/*
+ * ndarray.filled(fill_value): a plain copy in which every hidden element is
+ * replaced by `fill_value` (assigned like `arr[i] = fill_value`, so it must be
+ * representable in the dtype). The result never carries a mask and never
+ * shares memory with `self`; an unmasked array is simply copied.
+ */
+static PyObject *
+array_filled(PyArrayObject *self,
+        PyObject *const *args, Py_ssize_t len_args, PyObject *kwnames)
+{
+    PyObject *fill_value = NULL;
+    NPY_PREPARE_ARGPARSER;
+
+    if (npy_parse_arguments("filled", args, len_args, kwnames,
+            {"fill_value", NULL, &fill_value}) < 0) {
+        return NULL;
+    }
+
+    /* Validate `fill_value` even when there is nothing to replace. */
+    PyArray_Descr *descr = PyArray_DESCR(self);
+    Py_INCREF(descr);
+    PyArrayObject *src = (PyArrayObject *)PyArray_NewFromDescr(
+            &PyArray_Type, descr, 0, NULL, NULL, NULL, 0, NULL);
+    if (src == NULL) {
+        return NULL;
+    }
+    if (PyArray_Pack(PyArray_DESCR(src), PyArray_DATA(src), fill_value) < 0) {
+        Py_DECREF(src);
+        return NULL;
+    }
+
+    PyArrayObject *ret = (PyArrayObject *)PyArray_NewCopy(self, NPY_KEEPORDER);
+    if (ret == NULL) {
+        Py_DECREF(src);
+        return NULL;
+    }
+    PyArrayObject *mask = (PyArrayObject *)PyArray_MASK(self);
+    if (mask != NULL) {
+        /* The copy carries the mask; the filled result is a plain array. */
+        if (PyArray_SetMaskObject(ret, NULL) < 0 ||
+                PyArray_AssignArray(ret, src, mask, NPY_UNSAFE_CASTING) < 0) {
+            Py_DECREF(src);
+            Py_DECREF(ret);
+            return NULL;
+        }
+    }
+    Py_DECREF(src);
+    return (PyObject *)ret;
+}
+
 static PyObject *
 array_resize(PyArrayObject *self, PyObject *args, PyObject *kwds)
 {
@@ -1916,6 +1966,7 @@ array_reduce(PyArrayObject *self, PyObject *NPY_UNUSED(args))
        4) a npy_bool stating if Fortran or not
        5) a Python object representing the data (a string, or
        a list or any user-defined object).
+       6) (masked arrays only) the mask, a bool ndarray of the same shape.
 
        Notice because Python does not describe a mechanism to write
        raw data to the pickle, this performs a copy to a string first
@@ -1923,7 +1974,12 @@ array_reduce(PyArrayObject *self, PyObject *NPY_UNUSED(args))
        instead of a string,
     */
 
-    state = PyTuple_New(5);
+    /*
+     * A masked array appends the mask as a sixth item; unmasked arrays keep
+     * the 5-item format, so their pickles are unchanged and stay readable by
+     * any NumPy.
+     */
+    state = PyTuple_New(PyArray_MASK(self) != NULL ? 6 : 5);
     if (state == NULL) {
         Py_DECREF(ret);
         return NULL;
@@ -1949,6 +2005,10 @@ array_reduce(PyArrayObject *self, PyObject *NPY_UNUSED(args))
         return NULL;
     }
     PyTuple_SET_ITEM(state, 4, thestr);
+    if (PyArray_MASK(self) != NULL) {
+        Py_INCREF(PyArray_MASK(self));
+        PyTuple_SET_ITEM(state, 5, (PyObject *)PyArray_MASK(self));
+    }
     PyTuple_SET_ITEM(ret, 2, state);
     return ret;
 }
@@ -2098,6 +2158,7 @@ array_reduce_ex(PyArrayObject *self, PyObject *args)
 
     descr = PyArray_DESCR(self);
     if ((protocol < 5) ||
+        PyArray_MASK(self) != NULL ||
         PyDataType_FLAGCHK(descr, NPY_ITEM_HASOBJECT) ||
         (PyType_IsSubtype(((PyObject*)self)->ob_type, &PyArray_Type) &&
          ((PyObject*)self)->ob_type != &PyArray_Type) ||
@@ -2126,6 +2187,7 @@ array_setstate(PyArrayObject *self, PyObject *args)
     int version = 1;
     int is_f_order;
     PyObject *rawdata = NULL;
+    PyObject *maskobj = NULL;
     char *datastr;
     Py_ssize_t len;
     npy_intp dimensions[NPY_MAXDIMS];
@@ -2139,20 +2201,30 @@ array_setstate(PyArrayObject *self, PyObject *args)
     /* This will free any memory associated with a and
        use the string in setstate as the (writeable) memory.
     */
-    if (!PyArg_ParseTuple(args, "(iO!O!iO):__setstate__",
+    if (!PyArg_ParseTuple(args, "(iO!O!iOO!):__setstate__",
                             &version,
                             &PyTuple_Type, &shape,
                             &PyArrayDescr_Type, &typecode,
                             &is_f_order,
-                            &rawdata)) {
+                            &rawdata,
+                            &PyArray_Type, &maskobj)) {
         PyErr_Clear();
-        version = 0;
-        if (!PyArg_ParseTuple(args, "(O!O!iO):__setstate__",
-                            &PyTuple_Type, &shape,
-                            &PyArrayDescr_Type, &typecode,
-                            &is_f_order,
-                            &rawdata)) {
-            return NULL;
+        maskobj = NULL;
+        if (!PyArg_ParseTuple(args, "(iO!O!iO):__setstate__",
+                                &version,
+                                &PyTuple_Type, &shape,
+                                &PyArrayDescr_Type, &typecode,
+                                &is_f_order,
+                                &rawdata)) {
+            PyErr_Clear();
+            version = 0;
+            if (!PyArg_ParseTuple(args, "(O!O!iO):__setstate__",
+                                &PyTuple_Type, &shape,
+                                &PyArrayDescr_Type, &typecode,
+                                &is_f_order,
+                                &rawdata)) {
+                return NULL;
+            }
         }
     }
 
@@ -2354,6 +2426,13 @@ array_setstate(PyArrayObject *self, PyObject *args)
     }
 
     PyArray_UpdateFlags(self, NPY_ARRAY_UPDATE_ALL);
+    if (maskobj != NULL) {
+        /* Validates dtype/shape/invariant; steals the reference. */
+        Py_INCREF(maskobj);
+        if (PyArray_SetMaskObject(self, maskobj) < 0) {
+            goto end;
+        }
+    }
     result = Py_None;
     Py_INCREF(result);
 
@@ -3084,6 +3163,9 @@ NPY_NO_EXPORT PyMethodDef array_methods[] = {
     {"fill",
         (PyCFunction)array_fill,
         METH_FASTCALL, NULL},
+    {"filled",
+        (PyCFunction)array_filled,
+        METH_FASTCALL | METH_KEYWORDS, NULL},
     {"flatten",
         (PyCFunction)array_flatten,
         METH_FASTCALL | METH_KEYWORDS, NULL},
