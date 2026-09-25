@@ -31,8 +31,10 @@ performance backlog at the bottom).
 **Standing rule — sync upstream** (at the start of every session/phase and
 before every push): `git fetch origin main` → merge `origin/main` into the
 feature branch (stash WIP first) → rebuild → rerun the gate → confirm
-`git rev-list --count HEAD..origin/main` is `0`. Never sync from `fork/main`,
-never push `main`; `fork/<branch>` being current says nothing about upstream.
+`git rev-list --count HEAD..origin/main` is `0`. `main` is only a mirror of
+`origin/main`: fast-forward it (local and `fork/main`) and never commit or push
+anything else to it; do not sync from `fork/main`, `origin/main` is the source.
+`fork/<branch>` being current says nothing about upstream.
 
 **Gate after every change:** the plain-array baseline (mask == NULL) must
 behave exactly like upstream.
