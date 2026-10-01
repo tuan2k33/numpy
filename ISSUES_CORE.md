@@ -132,13 +132,13 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #15475 | ENH: Suggest "ignore" mode for ravel_multi_index | ❌ Còn | `ravel_multi_index` chưa có mode 'ignore' |
 | #16179 | slightly confusing error message for when calling reshape() with an in… | ❌ Còn | thông báo vẫn in shape (2,3) thay vì (-1,2,3) |
 | #17042 | DEP: Deprecate flatiter attributes (which produce confusing results) | ❌ Còn | `flatiter.index/coords` vẫn lệch 1 |
-| #17175 | BUG: Boolean indexing broken in `np.flatiter` | ✅ Đã giải quyết | nay IndexError rõ ràng (deprecation đã hoàn tất); chưa xác định PR; issue gắn sustain-2026 |
+| #17175 | BUG: Boolean indexing broken in `np.flatiter` | ✅ Đã giải quyết | nay IndexError rõ ràng (deprecation đã hoàn tất); PR #28590 (2025-08) thêm thông báo này; issue gắn sustain-2026 |
 
 ## Ufunc / gufunc (14)
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
-| #2543 | Redundant numeric type classes lead to unreliable behavior of isinstan… | ✅ Đã giải quyết | `isinstance(np.abs(x), np.int32)` đúng; theo comment maintainer đã đăng ký Number từ 1.9, chưa xác định PR; chưa thử trên Windows |
+| #2543 | Redundant numeric type classes lead to unreliable behavior of isinstan… | ✅ Đã giải quyết | `isinstance(np.abs(x), np.int32)` đúng; theo comment maintainer đã đăng ký Number từ 1.9 (commit 2d73ff34f4 'add support for python ABCs'); chưa thử trên Windows |
 | #3994 | abs() is slow for complex, add abs2() | ❌ Còn | vẫn chưa có `abs2` |
 | #7002 | Get rid of special scalar arithmetic. | 📝 Không repro được | thảo luận thiết kế |
 | #8811 | Feature request: signal broadcasting is OK over core dimension | 📝 Không repro được | thảo luận thiết kế gufunc |
