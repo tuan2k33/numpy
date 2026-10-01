@@ -73,7 +73,7 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #8969 | BUG: String fields in compound dtypes don't resize as might be expecte… | ❌ Còn | trường str vẫn thành '' (không resize) |
 | #9313 | BUG: Subarrays casts truncate and zero-pad without error or warning | ❌ Còn | cast subarray→int vẫn lấy phần tử đầu (ra 1) |
 | #11683 | core.records.fromfile fails without shape= | ✅ Đã giải quyết | `rec.fromfile` không có shape nay chạy được; chưa xác định PR |
-| #12207 | BUG: subclasses of np.void can cause a segfault | ✅ Đã giải quyết | nay ValueError rõ ràng thay vì stack overflow; PR liên quan #12254 ("a step towards fixing #12207"), chưa xác định PR sửa hẳn |
+| #12207 | BUG: subclasses of np.void can cause a segfault | ✅ Đã giải quyết | biến thể `.dtype`: PR #30179 (2025-11, 'fix dtype attribute recursion', có test `class vdt(np.void): dtype = vdt`); biến thể `_type_`: PR #12254 (ctype→dtype chuyển sang Python). Nay ValueError/không crash |
 | #13683 | np.full(..., dtype=structured-dtype) does not work as expected | ❌ Còn | `np.full` structured ra giá trị sai + cast warning |
 | #15470 | np.rec.fromarrays(...) may fail if resulting array is going to be empt… | ❌ Còn | `rec.fromarrays` rỗng + subarray vẫn lỗi broadcast |
 | #15849 | Conversion of nan in numpy.core.records.fromarrays | ❌ Còn | vẫn ValueError cannot convert NaN |
@@ -237,7 +237,7 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 |---|---|---|---|
 | #1530 | Add new convolve method for faster computation of even functions (Trac… | 📝 Không repro được | đề xuất tính năng |
 | #1858 | Use FFT in np.correlate/convolve? (Trac #1260) | 📝 Không repro được | đề xuất dùng FFT, chưa có |
-| #1905 | take with axis=1 from matrix with matrix indices gives row instead of … | ✅ Đã giải quyết | `take(matrix,..,axis=1)` đã đúng (matrix cũng đang bị deprecated); chưa xác định PR |
+| #1905 | take with axis=1 from matrix with matrix indices gives row instead of … | ✅ Đã giải quyết | `take(matrix,..,axis=1)` đã đúng (matrix cũng đang bị deprecated); chưa xác định PR (commit b397dde2e trên timeline là ticket Trac #1905 về allclose, không liên quan) |
 | #2310 | normalized cross-correlation (Trac #1714) | 📝 Không repro được | đề xuất tính năng (nên ở SciPy) |
 | #2453 | einsum with arbitrary operations: chaining ufuncs using einsums `'ij,j… | 📝 Không repro được | đề xuất tính năng |
 | #6631 | Request: currying `numpy.einsum` for repeated calls with the same subs… | 📝 Không repro được | đề xuất tính năng |
@@ -276,7 +276,7 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #13654 | MAINT: Fix undefined behaviour issues with memcpy | 📝 Không repro được | audit UB |
 | #15567 | DOC: how to find your way in the code, for instance the dot function | 📝 Không repro được | docs |
 | #15726 | Documentation for numpy.fromfunction induces an erroneous interpretati… | 📝 Không repro được | docs |
-| #16469 | [Feature Request] Add alias of np.concatenate as np.concat  | ✅ Đã giải quyết | `np.concat` đã có; PR #25086 (array API aliases, NumPy 2.0 release notes liệt kê `concat`) |
+| #16469 | [Feature Request] Add alias of np.concatenate as np.concat  | ✅ Đã giải quyết | `np.concat` đã có; PR #25086 (diff xác nhận `concat = concatenate` trong numeric.py, NumPy 2.0) |
 | #16569 | BUG: `order='K'` behavior for `tobytes` | ❌ Còn | `tobytes('K')` vẫn không khớp `ravel('K')` |
 | #18798 | accept a dtype argument in np.choose | ❌ Còn | `choose` chưa có `dtype` |
 | #21457 | MAINT: Create static inline functions for builtin (numeric?) casts | 📝 Không repro được | refactor |
