@@ -72,8 +72,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #7552 | Make ndarray and np.void splattable | ❌ Còn | ndarray vẫn không có `keys` |
 | #8969 | BUG: String fields in compound dtypes don't resize as might be expecte… | ❌ Còn | trường str vẫn thành '' (không resize) |
 | #9313 | BUG: Subarrays casts truncate and zero-pad without error or warning | ❌ Còn | cast subarray→int vẫn lấy phần tử đầu (ra 1) |
-| #11683 | core.records.fromfile fails without shape= | ✅ Đã giải quyết | `rec.fromfile` không có shape nay chạy được |
-| #12207 | BUG: subclasses of np.void can cause a segfault | ✅ Đã giải quyết | nay ValueError rõ ràng thay vì stack overflow |
+| #11683 | core.records.fromfile fails without shape= | ✅ Đã giải quyết | `rec.fromfile` không có shape nay chạy được; chưa xác định PR |
+| #12207 | BUG: subclasses of np.void can cause a segfault | ✅ Đã giải quyết | nay ValueError rõ ràng thay vì stack overflow; PR liên quan #12254 ("a step towards fixing #12207"), chưa xác định PR sửa hẳn |
 | #13683 | np.full(..., dtype=structured-dtype) does not work as expected | ❌ Còn | `np.full` structured ra giá trị sai + cast warning |
 | #15470 | np.rec.fromarrays(...) may fail if resulting array is going to be empt… | ❌ Còn | `rec.fromarrays` rỗng + subarray vẫn lỗi broadcast |
 | #15849 | Conversion of nan in numpy.core.records.fromarrays | ❌ Còn | vẫn ValueError cannot convert NaN |
@@ -87,7 +87,7 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #7829 | np.concatenate loses endianness / byte order | ❌ Còn | `concatenate` vẫn mất byte order '>i2'→int16 |
 | #8849 | ENH: Implement np.iinfo(np.bool_) | ❌ Còn | `iinfo(np.bool_)` vẫn ValueError |
 | #9049 | _dtype_from_pep3118 is overly strict on prefixes | ❌ Còn | vẫn lỗi (đổi thành ValueError 'not a valid PEP 3118') |
-| #9496 | Can't change dtype for non-continuous array | ✅ Đã giải quyết | `.view(complex)` trên mảng không liên tục đã chạy |
+| #9496 | Can't change dtype for non-continuous array | ✅ Đã giải quyết | `.view(complex)` trên mảng không liên tục đã chạy; PR #20722 (2022-01, NumPy 1.23) |
 | #15473 | Scalar constructors behave inconsistently on arrays | ❌ Còn | `np.int32(array)` vẫn không nhất quán |
 | #16052 | Different behaviour in np.array between object/scalar 0d arrays in ite… | ❌ Còn | `np.array([np.array(obj)])` vẫn lồng thêm array |
 | #16391 | Numpy timedelta64 NaT not converted to uint64 NaN | ❌ Còn | NaT→uint64 vẫn ra 9223372036854775808 |
@@ -124,7 +124,7 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #8875 | Strange roll multiple shift behavior | ❌ Còn | roll nhiều shift không axis vẫn cộng dồn |
 | #8899 | ENH: Possible improvements to `np.block` | ❌ Còn | `np.b_` vẫn chưa có |
 | #8972 | ValueError reshaping empty arrays | ❌ Còn | `reshape(-1,0)` vẫn ValueError, thông báo khó hiểu |
-| #9818 | Proposal: add an optional copy argument to np.reshape | ✅ Đã giải quyết | `reshape(copy=)` đã có (NumPy 2.1) |
+| #9818 | Proposal: add an optional copy argument to np.reshape | ✅ Đã giải quyết | `reshape(copy=)` đã có; PR #26292 (NumPy 2.1) |
 | #11309 | Attempt to grow array by assigning a size-1 array to a size-0 slice do… | ❌ Còn | `a[5:5]=[123]` vẫn im lặng |
 | #14168 | nditer usage with index and buffered flags | ❌ Còn | nditer buffered+multi_index vẫn luôn trả (0,0,0) |
 | #14396 | asarray array disagrees with isscalar about what is a scalar (at least… | ❌ Còn | `asarray({1,2,3})` vẫn shape () |
@@ -132,13 +132,13 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #15475 | ENH: Suggest "ignore" mode for ravel_multi_index | ❌ Còn | `ravel_multi_index` chưa có mode 'ignore' |
 | #16179 | slightly confusing error message for when calling reshape() with an in… | ❌ Còn | thông báo vẫn in shape (2,3) thay vì (-1,2,3) |
 | #17042 | DEP: Deprecate flatiter attributes (which produce confusing results) | ❌ Còn | `flatiter.index/coords` vẫn lệch 1 |
-| #17175 | BUG: Boolean indexing broken in `np.flatiter` | ✅ Đã giải quyết | nay IndexError rõ ràng (deprecation đã hoàn tất); issue gắn sustain-2026 |
+| #17175 | BUG: Boolean indexing broken in `np.flatiter` | ✅ Đã giải quyết | nay IndexError rõ ràng (deprecation đã hoàn tất); chưa xác định PR; issue gắn sustain-2026 |
 
 ## Ufunc / gufunc (14)
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
-| #2543 | Redundant numeric type classes lead to unreliable behavior of isinstan… | ✅ Đã giải quyết | `isinstance(np.abs(x), np.int32)` đúng; đã đăng ký Number từ 1.9 |
+| #2543 | Redundant numeric type classes lead to unreliable behavior of isinstan… | ✅ Đã giải quyết | `isinstance(np.abs(x), np.int32)` đúng; theo comment maintainer đã đăng ký Number từ 1.9, chưa xác định PR; chưa thử trên Windows |
 | #3994 | abs() is slow for complex, add abs2() | ❌ Còn | vẫn chưa có `abs2` |
 | #7002 | Get rid of special scalar arithmetic. | 📝 Không repro được | thảo luận thiết kế |
 | #8811 | Feature request: signal broadcasting is OK over core dimension | 📝 Không repro được | thảo luận thiết kế gufunc |
@@ -159,7 +159,7 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 |---|---|---|---|
 | #834 | reduceat cornercase (Trac #236) | ❌ Còn | `add.reduceat(a,(1,1))` vẫn ra [1,10] |
 | #835 | reduceat should handle outlier indices gracefully (Trac #237) | ❌ Còn | `reduceat` với index len(a) vẫn IndexError |
-| #7179 | ENH: linalg.qr should be a gufunc (which will release the GIL) | ✅ Đã giải quyết | qr dùng gufunc (`qr_reduced/complete/r_raw`), 2 thread chạy song song |
+| #7179 | ENH: linalg.qr should be a gufunc (which will release the GIL) | ✅ Đã giải quyết | qr dùng gufunc (`qr_reduced/complete/r_raw`), 2 thread chạy song song; PR #19151 "Vectorising np.linalg.qr" (2021-07) |
 | #9182 | ENH: argmax can be made faster for non-contiguous axes. | ❌ Còn | `argmax axis=0` vẫn copy toàn bộ (288MB) và chậm |
 | #14371 | ENH: Adding where for argmin | ❌ Còn | `argmin` chưa có `where` |
 | #18512 | ENH: Iterator does not block and NumPy has no transposed copy fast-pat… | ❌ Còn | argmax nx=1280 vẫn chậm gấp đôi 1281 (0.105s vs 0.053s) |
@@ -198,7 +198,7 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #7594 | Roundtripping error for unicode ndarrays with char.encode and char.dec… | 📝 Không repro được | repro đơn giản (utf-32-be) round-trip đúng; cần ca có null cuối |
 | #7619 | BUG: .item() on a 0-dimensional datetime64[ns] array yields an integer | ❌ Còn | `.item()` datetime64[ns] vẫn ra int |
 | #8089 | python incompatibility: bytes_ behaviour inconsistent with python | ❌ Còn | `bytes_` vẫn cắt null cuối |
-| #8161 | BUG: datetime64 construction can underflow | ✅ Đã giải quyết | nay ra đúng 1677-09-21T22:26:03.145224192, không còn tràn |
+| #8161 | BUG: datetime64 construction can underflow | ✅ Đã giải quyết | nay ra đúng 1677-09-21T22:26:03.145224192, không còn tràn; chưa xác định PR |
 | #8224 | set_printoptions: custom formatter issues with string types | ❌ Còn | formatter str/bytes vẫn không tách riêng được |
 | #11547 | printoptions "suppression" of scientific method is not doing anything … | ❌ Còn | `suppress` vẫn không áp dụng ≥1e8 (docs chưa nêu) |
 | #16921 | BUG: String to complex longdouble conversions are  not full precision | ❌ Còn | clongdouble(str) vẫn qua float64 (trùng #26701) |
@@ -237,7 +237,7 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 |---|---|---|---|
 | #1530 | Add new convolve method for faster computation of even functions (Trac… | 📝 Không repro được | đề xuất tính năng |
 | #1858 | Use FFT in np.correlate/convolve? (Trac #1260) | 📝 Không repro được | đề xuất dùng FFT, chưa có |
-| #1905 | take with axis=1 from matrix with matrix indices gives row instead of … | ✅ Đã giải quyết | `take(matrix,..,axis=1)` đã đúng (matrix cũng đang bị deprecated) |
+| #1905 | take with axis=1 from matrix with matrix indices gives row instead of … | ✅ Đã giải quyết | `take(matrix,..,axis=1)` đã đúng (matrix cũng đang bị deprecated); chưa xác định PR |
 | #2310 | normalized cross-correlation (Trac #1714) | 📝 Không repro được | đề xuất tính năng (nên ở SciPy) |
 | #2453 | einsum with arbitrary operations: chaining ufuncs using einsums `'ij,j… | 📝 Không repro được | đề xuất tính năng |
 | #6631 | Request: currying `numpy.einsum` for repeated calls with the same subs… | 📝 Không repro được | đề xuất tính năng |
@@ -270,13 +270,13 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #10290 | BUG: ptp fails on datetime types with out parameter | ❌ Còn | `ptp(out=)` datetime vẫn UFuncTypeError |
 | #10296 | Audit `mem_overlap.c` to rationalize the use of unsigned integers. | 📝 Không repro được | audit code |
 | #10801 | DOC: Document einsum's index parsing and mapping code | 📝 Không repro được | docs |
-| #11266 | missing np.get_string_function (counterpart of np.set_string_function) | ✅ Đã giải quyết | `set_string_function` đã bị gỡ; issue không còn ý nghĩa |
+| #11266 | missing np.get_string_function (counterpart of np.set_string_function) | ✅ Đã giải quyết | `set_string_function` đã bị gỡ (PR #26611, 2024-06); issue không còn ý nghĩa |
 | #11407 | np.exp raises AttributeError when called with large integer | ◐ Một phần | nay TypeError thay vì AttributeError, vẫn không ra inf |
 | #11502 | ENH: for one variable data, np.cov should return either a scalar or a … | ❌ Còn | `cov` 1 hàng vẫn ra shape () |
 | #13654 | MAINT: Fix undefined behaviour issues with memcpy | 📝 Không repro được | audit UB |
 | #15567 | DOC: how to find your way in the code, for instance the dot function | 📝 Không repro được | docs |
 | #15726 | Documentation for numpy.fromfunction induces an erroneous interpretati… | 📝 Không repro được | docs |
-| #16469 | [Feature Request] Add alias of np.concatenate as np.concat  | ✅ Đã giải quyết | `np.concat` đã có |
+| #16469 | [Feature Request] Add alias of np.concatenate as np.concat  | ✅ Đã giải quyết | `np.concat` đã có; PR #25086 (array API aliases, NumPy 2.0 release notes liệt kê `concat`) |
 | #16569 | BUG: `order='K'` behavior for `tobytes` | ❌ Còn | `tobytes('K')` vẫn không khớp `ravel('K')` |
 | #18798 | accept a dtype argument in np.choose | ❌ Còn | `choose` chưa có `dtype` |
 | #21457 | MAINT: Create static inline functions for builtin (numeric?) casts | 📝 Không repro được | refactor |
