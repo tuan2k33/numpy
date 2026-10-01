@@ -10,6 +10,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 3. Gắn với một họ dtype đặc biệt (datetime, longdouble, string/bytes, structured) → nhóm dtype đó.
 4. Còn lại xếp theo hàm/API chính nêu trong tiêu đề (arange, reshape, indexing, reduction, ...). Issue hiệu năng xếp cùng nhóm với hàm bị chậm.
 
+**NEP:** mỗi nhóm có dòng "NEP liên quan" (trạng thái đọc từ `doc/neps/`). Những chỗ ghi "đã kiểm" là tôi chạy lại trên numpy 2.5.3; phần còn lại là tóm tắt từ nội dung NEP, chưa kiểm hành vi.
+
 | Kết luận | Số lượng |
 |---|---|
 | ✅ Đã giải quyết | 9 |
@@ -20,6 +22,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 > Label `sustain-2026` (NumFOCUS Sustaining Open Source Series 2026) gắn trên #10332, #13547, #17118, #17175, #21676, #25910: nên tránh tự nhận/đóng khi chưa rõ sự kiện.
 
 ## Platform / kiến trúc / build (8)
+
+**NEP liên quan:** NEP 57 (Draft): định nghĩa các tier hỗ trợ nền tảng; ppc64le/SPARC/i686 phụ thuộc tier, không có NEP nào cam kết sửa từng lỗi. NEP 29 (Final): chính sách phiên bản Python/numpy được hỗ trợ.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -33,6 +37,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #26746 | np.fmin returns inconsistent results for -0.0 and 0.0 across different… | ❌ Còn | fmin(±0.0) vẫn phụ thuộc thứ tự tham số (Linux) |
 
 ## C API, bộ nhớ, buffer, nội bộ (13)
+
+**NEP liên quan:** NEP 49 (Final): handler cấp phát bộ nhớ, ở mức Python chỉ có `get_handler_name`, nên #21533 (API allocator cho Python) vẫn là đề xuất mới. NEP 53 (Draft): tiến hóa C ABI, đã làm một phần ở 2.0, không nhắm vào issue nào cụ thể. NEP 45 (Active): C style guide, liên quan #21457. NEP 42 (Accepted): dtype mới, liên quan #23500 (buffer protocol).
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -52,6 +58,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 ## Datetime / timedelta (4)
 
+**NEP liên quan:** NEP 7 (Final) là bản thiết kế datetime đang dùng, NEP 4 (Deferred) là bản thay thế không làm. Không NEP nào đụng tới các issue trong nhóm.
+
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
 | #7619 | BUG: .item() on a 0-dimensional datetime64[ns] array yields an integer | ❌ Còn | `.item()` datetime64[ns] vẫn ra int |
@@ -61,6 +69,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 ## Longdouble / float128 (4)
 
+**NEP liên quan:** Không có NEP riêng. NEP 42 (Accepted) chỉ nhắc ở phần ghi chú rằng subclass của float128 mất độ chính xác khi cast.
+
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
 | #2376 | Support full long double precision in __format__ (Trac #1783) | ❌ Còn | format longdouble vẫn mất độ chính xác |
@@ -69,6 +79,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #26701 | BUG: `clongdouble(str)` parses string to `float64` and loses precision… | ❌ Còn | clongdouble(str) vẫn qua float64 (trùng #16921) |
 
 ## String / bytes và printing (9)
+
+**NEP liên quan:** NEP 55 (Final): `StringDType` và `np.strings` ufunc, là hướng thay cho dtype `S`/`U`, nên các issue về `S`/`U` khó có khả năng được sửa ở dtype cũ. NEP 58 (Draft): `ByteStringDType`, khẳng định text và bytes không bao giờ promote/cast ngầm, liên quan #8089/#3481. NEP 51 (Accepted, đã vào 2.0): repr scalar thành `np.float32(3.0)`, liên quan nhóm printing.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -83,6 +95,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #25910 | ENH: Optimize np.strings.expandtabs to avoid unnecessary copies | 📝 Không repro được | tối ưu hiệu năng, sustain-2026 |
 
 ## Structured / record / void (10)
+
+**NEP liên quan:** NEP 9 (Deferred): mở rộng structured array, chưa làm, nên các issue tính năng cho structured/record không có lộ trình. NEP 40/41 (Final/Accepted): hệ dtype mới, structured vẫn là legacy dtype.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -99,6 +113,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 ## Tạo mảng (arange, linspace, fromfunction) (9)
 
+**NEP liên quan:** NEP 35 (Final): tham số `like=` cho hàm tạo mảng. NEP 56 (Final): ngữ nghĩa `copy`. Không NEP nào đổi hành vi arange/linspace.
+
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
 | #630 | Add step parameter to linspace (or endpoint parameter to arange) (Trac… | ❌ Còn | linspace vẫn không có `step` |
@@ -112,6 +128,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #18881 | linspace with int dtype sometimes doesn't include endpoints | ❌ Còn | endpoint vẫn mất chữ số cuối (…992) |
 
 ## Scalar, 0-d, array coercion (11)
+
+**NEP liên quan:** NEP 50 (Final, vào 2.0): promotion theo scalar Python 'weak', bỏ value-based casting, scalar Python ngoài khoảng của dtype ném OverflowError; kiểm trên 2.5.3 đúng vậy. NEP 34 (Final): list lồng không đều ném ValueError thay vì tạo mảng object (đã kiểm), chưa chắc liên quan #16052 (tôi chưa kiểm). NEP 51 (Accepted): repr scalar. NEP 27 (Final): lý do xem 0-d array như scalar. NEP 13/18 (Final): `__array_ufunc__`/`__array_function__`, liên quan #12142, #13831.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -129,6 +147,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 ## Shape (reshape, concat, roll, block) (9)
 
+**NEP liên quan:** NEP 56 (Final): thêm `concat` và tham số `copy`/`shape` cho reshape theo Array API; đó chính là PR sửa #16469 và #9818. NEP 52 (Final): dọn alias Python API.
+
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
 | #3817 | reshape() should have a way to keep a dimension unchanged. | ❌ Còn | chưa có keepaxis (đề xuất thiết kế) |
@@ -142,6 +162,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #16469 | [Feature Request] Add alias of np.concatenate as np.concat  | ✅ Đã giải quyết | `np.concat` chưa có ≤1.26.4, có từ 2.0.2; PR #25086 |
 
 ## Indexing, assignment, broadcasting, take (14)
+
+**NEP liên quan:** NEP 21 (Deferred): đề xuất `oindex`/`vindex` và làm lại luật advanced indexing; **chưa implement** (`arr.oindex` không tồn tại ở 2.5.3, đã kiểm), nên các issue về luật indexing không có lộ trình.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -162,6 +184,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 ## Dtype object, byte order (7)
 
+**NEP liên quan:** NEP 40/41/42 (Final/Accepted): hệ DType mới (`DType` class, `canonical` thay cho khái niệm byte order, tracking #16624). NEP 52 (Final): gỡ các hàm `*sctype`.
+
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
 | #1725 | Make the dtype object immutable and not coerce other types when compar… | ❌ Còn | đổi `dtype.names` vẫn lan sang view |
@@ -173,6 +197,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #17544 | cumsum() changes endianness | ❌ Còn | `cumsum(dtype='>i4')` vẫn ra int32 little-endian |
 
 ## Casting và type promotion (8)
+
+**NEP liên quan:** NEP 50 (Final): promotion theo scalar weak; Python int ngoài khoảng ném OverflowError (đã kiểm); `int64 == float64` vẫn promote sang float64 nên #9733 không đổi. NEP 42 (Accepted): thiết kế casting qua `ArrayMethod`.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -186,6 +212,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #25621 | Deprecating in-place operations where the out-of-place equivalent woul… | ❌ Còn | `a+=int16(4096)` vẫn im lặng cắt về int8 |
 
 ## Số học: overflow, độ chính xác, giá trị biên (11)
+
+**NEP liên quan:** NEP 50 (Final): ghi rõ 'overflow warnings on integer power are missing' (liên quan #4126), phép `scalar op scalar` vẫn warn còn mảng thì không (#8987 vẫn như cũ, đã kiểm). Không NEP nào sửa các issue còn lại.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -203,6 +231,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 ## Rounding (6)
 
+**NEP liên quan:** NEP 56 (Final): `ceil`/`floor`/`trunc` giữ dtype số nguyên khi input là số nguyên (đã kiểm: `np.ceil(int64 array)` giữ int64); nhưng với float vẫn trả float (`np.ceil(1.5)` là `2.0`), nên #9068 vẫn còn. Không NEP nào về `__round__`.
+
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
 | #3540 | subtypes and round() | ❌ Còn | `round(decimals=-1)` vẫn trả ndarray thay vì subclass |
@@ -213,6 +243,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #15438 | TypeError when using np.around() on an integer array with in-place opt… | ❌ Còn | `around(int, decimals=-1, out=a)` vẫn UFuncTypeError |
 
 ## Ufunc / gufunc machinery (10)
+
+**NEP liên quan:** NEP 5 và NEP 20 (Final): gufunc và signature mở rộng (liên quan #8811, #11118, #11228). NEP 43 (Draft, đã implement phần lớn qua `ArrayMethod`): ufunc mở rộng, liên quan #11109, #30413. NEP 13 (Final): `__array_ufunc__`. NEP 38 (Final) / NEP 54 (Accepted): SIMD/Highway, liên quan #17359.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -228,6 +260,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #30413 | ENH: Allow ufuncs to request the iterator to provide contiguous arrays | 📝 Không repro được | enh, không phải bug |
 
 ## Reduction / thống kê (11)
+
+**NEP liên quan:** NEP 12 (Deferred): missing data / `skipna`, không làm; `where=` được thêm riêng ở 1.17. NEP 10 (Final): iterator mới. Không NEP nào đụng tới reduceat/argmin.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -245,6 +279,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 ## Iterator và memory layout (3)
 
+**NEP liên quan:** NEP 10 (Final): thiết kế `nditer`, là NEP gốc cho #14168, #18512.
+
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
 | #14168 | nditer usage with index and buffered flags | ❌ Còn | nditer buffered+multi_index vẫn luôn trả (0,0,0) |
@@ -252,6 +288,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #18512 | ENH: Iterator does not block and NumPy has no transposed copy fast-pat… | ❌ Còn | argmax nx=1280 vẫn chậm gấp đôi 1281 (0.105s vs 0.053s) |
 
 ## Sort, search, set, so sánh, đếm (9)
+
+**NEP liên quan:** NEP 56 (Final): thêm `unique_all/counts/inverse/values`; không sửa các issue nhóm này (#11136 `unique` chậm, #641 unique object).
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -266,6 +304,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #16903 | bincount fails for complex weights | ❌ Còn | `bincount` weights complex vẫn TypeError |
 
 ## Linear algebra, tích, einsum, correlate (14)
+
+**NEP liên quan:** NEP 56 (Final): thêm `vecdot`, `matrix_transpose`, `.mT`, `linalg.cross` (đã kiểm có); `np.cross` với vector 2 chiều ném ValueError (đã kiểm), nên #13718 chỉ mới một phần: chưa có `cross2d`. `.mH` chưa có (#13797). NEP 32 (Final): gỡ hàm tài chính, không liên quan.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
@@ -286,6 +326,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 ## Subclass, memmap, pickle (7)
 
+**NEP liên quan:** NEP 18 (Final): `__array_function__`; NEP 22 (Final): tổng quan duck typing; NEP 30/37 (Superseded): bị NEP 18/47 thay. Không NEP nào về memmap hay pickle.
+
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
 | #2348 | empty_like not passing across attributes of memmap objects (Trac #1753… | ❌ Còn | `empty_like(memmap)` vẫn trả memmap với `_mmap=None` |
@@ -297,6 +339,8 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 | #13172 | ENH: Add `madvise` for `memmap` objects | ❌ Còn | `np.memmap` chưa có `madvise` |
 
 ## File I/O (fromfile, fromstring) (6)
+
+**NEP liên quan:** NEP 1 (Final): định dạng `.npy`, không phải `fromfile`/`fromstring` dạng text/binary thô. Không NEP nào liên quan.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
