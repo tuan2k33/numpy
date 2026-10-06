@@ -161,3 +161,19 @@ Tính trung gian bằng **float64** rồi cast về một lần:
 ### 9.5. Hệ quả hành vi (cần maintainer đồng ý)
 - Kết quả đổi cho các giá trị gần điểm giữa; ví dụ trong docstring `np.round(16.055, 2)` (hiện `16.06`, Python `16.05`) sẽ thành `16.05`, và ví dụ `56294995342131.5` với `decimals=3` thành `…131.5`. Phải sửa docstring và thêm release note; có thể code downstream đang phụ thuộc vào kết quả cũ.
 - Bù lại: hết tràn trong khoảng này (#13699), hết `nan` với float16, và `np.round` khớp `round()` của Python.
+
+### 9.6. Kết quả kiểm chứng thuật toán (script nháp `val3.py`/`val4.py`, scratchpad; chạy CPU, Python thuần + `math.fma`)
+
+| Kiểm tra | Kết quả |
+|---|---|
+| `10^k` chính xác trong float64 với k ≤ 22; trong float32 với k ≤ 10 (`10^11` thì không) | đúng |
+| `np.round` thật (2.5.3) so với `round(x, d)` của Python, float64, 100000 × 16 giá trị `d` | khác 0.353% (khớp số 0.34% ước lượng trước đó, nên baseline đo trên `np.round` thật) |
+| `round()` của Python so với tham chiếu hữu tỉ chính xác (`Fraction`), 50000 mẫu | khớp hoàn toàn |
+| Thuật toán mục 9.2, float64, các giá trị biên (±0, ±inf, nan, cận `2^52/2^53`, subnormal nhỏ nhất, `DBL_MAX`) | khớp Python, kể cả dấu của số 0 |
+| Thuật toán, float64, 400000 mẫu log-đều trên toàn dải số mũ | khớp |
+| Thuật toán, **float16 vét cạn** (63488 giá trị hữu hạn × 16 giá trị `d`, 22 giây), tham chiếu chính xác | khớp hoàn toàn |
+| Thuật toán, float32, 60000 mẫu (ngẫu nhiên, đúng điểm giữa, lệch 1 ulp) | khớp |
+
+Hai lỗi nằm ở **script**, không phải thuật toán, và đã sửa trước khi có bảng trên: (1) `round()` của Python trả `int` nên mất dấu của `-0.0` (trong C, `rint(-0.0)` giữ dấu; cài đặt phải dùng `rint` thật hoặc `copysign`); (2) hàm tham chiếu chọn nhầm `65504` khi giá trị làm tròn tràn float16 (chuẩn IEEE là `inf` từ `65520`).
+
+Chưa làm: vét cạn float32 (2^32 × 16, cần harness C với tham chiếu số nguyên 128 bit), chạy trên nhiều CPU, đo tốc độ. Các điểm phụ: máy này có `fma` và `avx2` nhưng không có `avx512`; có `gcc`.
