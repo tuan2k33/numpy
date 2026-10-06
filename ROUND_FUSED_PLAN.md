@@ -177,3 +177,52 @@ Tính trung gian bằng **float64** rồi cast về một lần:
 Hai lỗi nằm ở **script**, không phải thuật toán, và đã sửa trước khi có bảng trên: (1) `round()` của Python trả `int` nên mất dấu của `-0.0` (trong C, `rint(-0.0)` giữ dấu; cài đặt phải dùng `rint` thật hoặc `copysign`); (2) hàm tham chiếu chọn nhầm `65504` khi giá trị làm tròn tràn float16 (chuẩn IEEE là `inf` từ `65520`).
 
 Chưa làm: vét cạn float32 (2^32 × 16, cần harness C với tham chiếu số nguyên 128 bit), chạy trên nhiều CPU, đo tốc độ. Các điểm phụ: máy này có `fma` và `avx2` nhưng không có `avx512`; có `gcc`.
+
+### 9.7. Kết quả vét cạn float32, float16 và đo tốc độ proxy (CPU, đơn luồng)
+
+Mã nháp (không nằm trong repo) lưu ở `/mnt/c/Dev/numpy-round-experiments/`: `exh32*.c` (vét cạn, tham chiếu số nguyên 64/128 bit), `bench_round.c` (benchmark), `val*.py` (kiểm chứng Python). Biên dịch: `gcc -O2 -fopenmp -mfma -mavx2 -ffp-contract=off`.
+
+**Đơn giản hóa thuật toán (đã kiểm chứng).** `rint` chọn số chẵn khi đúng điểm giữa, nên khi `|s - nh| = 0.5` thì `nh` luôn chẵn; do đó không cần kiểm tra chẵn/lẻ và chỉ cần **dấu** của `e` (không chia `e/p`, bỏ một phép chia):
+```
+nh = rint(s);  diff = s - nh
+nếu diff ==  0.5 và e > 0: nh += 1
+nếu diff == -0.5 và e < 0: nh -= 1
+```
+float64: khớp `round()` của Python trên 5 × 400000 mẫu (`val5.py`).
+
+**Vét cạn float32 (2^32 mẫu × 16 giá trị `d`, tham chiếu số nguyên chính xác, kiểm tra bằng so sánh bit gồm dấu của số 0): 0 sai khác ở cả ba biến thể:**
+1. double trung gian + `fma` + hiệu chỉnh (`exh32.c`)
+2. double trung gian, **không `fma`, không `e`, không guard**: `(float)(rint(x*p)/p)` (`exh32s.c`)
+3. **float thuần** (`fmaf`, hiệu chỉnh theo dấu `e`, guard tại `2^24`) (`exh32n.c`)
+
+Harness có phát hiện lỗi: một biến thể cố ý làm sai (làm tròn tích về float) báo 566231 sai khác trong một dải nhỏ.
+
+**float16 vét cạn (63488 giá trị × 16 `d`):** 0 sai khác cho cả (a) tính trong float32 rồi cast về float16 một lần, (b) double đơn giản không `fma` (`val6.py`).
+
+**Benchmark proxy** (C, AVX2, 1 luồng, `-O2`, mảng 24 → 8·10^6 phần tử; **không** mô hình hóa overhead gọi ufunc; chạy lặp cho thấy nhiễu khoảng ±10–20%, nên chênh lệch dưới ~15% không kết luận được). A3 = 3 lượt như hiện tại; B2 = một lượt, đường nhanh `mul → rint → sub → kiểm tra |diff|==0.5 và guard`, chỉ chạy `fma`/hiệu chỉnh khi vector có lane đúng điểm giữa hoặc lane vượt guard:
+
+| Dữ liệu | float64 B2/A3 | float32 B2/A3 (float thuần) |
+|---|---|---|
+| ngẫu nhiên, mảng ≥ 1000 | 0.49–0.73× | 0.62–0.73× |
+| ngẫu nhiên, 8·10^6 | ~0.41× | ~0.40× |
+| ngẫu nhiên, 24 phần tử | 0.82× (d=2), 1.12× (d=-2) | 0.84× (d=2), 1.06× (d=-2) |
+| **mọi lane đều là điểm giữa** (xấu nhất), mảng 1000–10^5 | 1.03–1.30× | 1.15–1.77× |
+| xấu nhất, ≥ 10^6 | 0.72–0.77× | 1.23–1.45× (10^6), ~0.5× (8·10^6) |
+
+Các biến thể nhanh hơn `exact` toàn phần (B1/Bn) vì B1/Bn luôn chạy `fma` và hiệu chỉnh: B1 (float64) 0.94–1.09× ở mảng 10^4, Bn (float32) 1.03–1.5× ở mảng nhỏ. Phương án "float32 tính trung gian bằng double" (Bf) chậm hơn A3f 1.3–1.9× khi mảng nằm trong cache, **không nên dùng cho float32** (dùng float thuần + `fmaf`).
+
+**Số đo thật của `np.round` (2.5.3, máy này, `a ∈ [-1000, 1000]`, thời gian cả lời gọi):**
+
+| dtype | n=24 | n=1000 | n=10^4 | n=10^6 | n=8·10^6 |
+|---|---|---|---|---|---|
+| float64 `round(a, 2)` | 2.46 µs | 3.35 µs | 9.0 µs | 1.31 ms | 26.6 ms |
+| float32 `round(a, 2)` | 2.95 µs | 3.26 µs | 5.7 µs | 0.32 ms | 10.1 ms |
+| float16 `round(a, 2)` | 5.1 µs | 50 µs | 562 µs | 53.8 ms | 436 ms |
+| (một lời gọi `np.rint(a, out=)`, float64) | 0.42 µs | 0.56 µs | 1.9 µs | 0.75 ms | 7.9 ms |
+
+Nhận xét: (1) mảng nhỏ bị overhead chi phối (~2.5–3 µs/lời gọi, mỗi ufunc ~0.4 µs), nên gộp 3 ufunc thành 1 tiết kiệm trực tiếp ~0.8–1 µs bất kể kernel; (2) float16 chậm ~50 ns/phần tử (loop vô hướng, ~50× chậm hơn float64) nên kernel gộp float16 là thắng lớn; (3) với mảng 10^4–10^6, kết quả cuối phụ thuộc kernel thật, đường nhanh B2 kỳ vọng nhanh hơn, nhưng **chưa được đo trong numpy thật**.
+
+**Kết luận tạm thời / việc còn lại:**
+- Về đúng/sai: ba biến thể float32 và float16 đã vét cạn; float64 mới kiểm bằng mẫu + tập đối kháng (5 × 400000 + 400000 log-đều), **chưa vét cạn** và không thể vét cạn.
+- Về tốc độ: proxy cho thấy B2 (đường nhanh) đạt mục tiêu "không chậm" trên dữ liệu thường, nhưng **chưa đạt trong ca xấu nhất** (mọi lane là điểm giữa, mảng nằm trong cache, chậm hơn 1.2–1.8× ở phần tính toán). Cần đo trong numpy thật, bao gồm dữ liệu dạng "giá tiền có 3 chữ số thập phân" (nhiều lane là điểm giữa), trước khi hứa là không chậm. Có thể cải thiện đường chậm (dùng lại các giá trị đã tính, hoặc quyết định đường theo thống kê vector).
+- float64 cần fma phần cứng; baseline x86 không có FMA chưa có phương án (xem 9.4).
