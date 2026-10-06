@@ -226,3 +226,13 @@ Nhận xét: (1) mảng nhỏ bị overhead chi phối (~2.5–3 µs/lời gọi
 - Về đúng/sai: ba biến thể float32 và float16 đã vét cạn; float64 mới kiểm bằng mẫu + tập đối kháng (5 × 400000 + 400000 log-đều), **chưa vét cạn** và không thể vét cạn.
 - Về tốc độ: proxy cho thấy B2 (đường nhanh) đạt mục tiêu "không chậm" trên dữ liệu thường, nhưng **chưa đạt trong ca xấu nhất** (mọi lane là điểm giữa, mảng nằm trong cache, chậm hơn 1.2–1.8× ở phần tính toán). Cần đo trong numpy thật, bao gồm dữ liệu dạng "giá tiền có 3 chữ số thập phân" (nhiều lane là điểm giữa), trước khi hứa là không chậm. Có thể cải thiện đường chậm (dùng lại các giá trị đã tính, hoặc quyết định đường theo thống kê vector).
 - float64 cần fma phần cứng; baseline x86 không có FMA chưa có phương án (xem 9.4).
+
+### 9.8. Không có FMA phần cứng thì sao
+
+- **float32 / float16: không cần FMA.** Biến thể double đơn giản `(float)(rint(x*p)/p)` đã vét cạn 0 sai khác (9.7); tích `x*p` chính xác trong double. Chỉ thiệt về lane (4 double so với 8 float).
+- **float64: FMA chỉ dùng để lấy dấu của phần dư chính xác `e`**, và trong thiết kế B2 chỉ chạy ở **đường chậm** (vector có lane đúng điểm giữa hoặc lane vượt guard). Đường nhanh (`mul → rint → sub → kiểm tra |diff|==0.5 → div`) không dùng FMA, nên baseline không có FMA giữ nguyên tốc độ đường nhanh.
+- Thay FMA ở đường chậm bằng phép nhân chính xác kiểu Dekker/Veltkamp, **không cần FMA**, đã kiểm bằng Python thuần (double IEEE, không FMA, `val7.py`): 0 sai khác trên 5 × 400000 mẫu so với `round()` của Python.
+  - `d >= 0`: tách `x = xh + xl` (nhân `2^27 + 1`), `e = (xh*p - s) + xl*p` (`p ≤ 10^8` chỉ cần ≤ 19 bit nên không cần tách `p`); lấy dấu của `e`.
+  - `d < 0`: tách `s = sh + sl`, `e1 = x - sh*p`, `e2 = sl*p` (cả hai chính xác); so sánh `e1` với `e2` thay vì trừ.
+- Chi phí: khoảng 8–10 phép tính thay cho 1 FMA, chỉ trên đường chậm. **Chưa đo.** Yêu cầu biên dịch: tắt FP contraction (`-ffp-contract=off`) để trình biên dịch không gộp các phép nhân/cộng làm hỏng tính chính xác của phép tách; cần chắc không chạy trên x87.
+- Điều kiện chưa kiểm: Dekker cần `|x|·(2^27+1)` không tràn; đường chậm đã loại các lane `|s| ≥ 2^53`, nên `|x|` đủ nhỏ.
