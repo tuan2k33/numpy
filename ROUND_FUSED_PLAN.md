@@ -114,3 +114,50 @@ Dùng ufunc sẽ kéo theo `__array_wrap__`/subclass propagation, có thể làm
 - Hành vi hiện tại ngoài khoảng là rác: float64 `decimals>=309` hoặc `<=-309` ra `nan`; `decimals=308` ra `inf`; float32 `decimals=100` ra `nan`; float16 `decimals=10` ra `nan`.
 - Kernel chỉ nhận `p = 10^|d|`, không nhận `d`, nên khoảng của `d` không ảnh hưởng tốc độ kernel. Chỉ cần kẹp `d` một lần (O(1)) trong `PyArray_Round` trước khi gọi kernel.
 - `power_of_ten` nhân dần `1e9 * 10 * ...` cho `n >= 9` nên cộng dồn sai số: mô phỏng lại vòng lặp đó cho thấy 240/309 giá trị `10^n` khác `float('1e%d' % n)` (bắt đầu từ n=25, lệch 1 ulp). Chỉ ảnh hưởng `decimals >= 25`; khi thay bằng bảng hằng số thì kết quả cho `decimals` lớn sẽ đổi nhẹ. Cần cân nhắc khi giữ bit-identical ở giai đoạn A (giữ nguyên hàm cũ cho đến PR 2).
+
+## 9. Mục tiêu mới: `decimals ∈ [-8, 7]` phải chuẩn và nhanh
+
+Thay thế/làm rõ giai đoạn B ở trên: nhắm tới kết quả **làm tròn đúng** (trùng `round(x, d)` của Python, vốn làm tròn chính xác theo giá trị nhị phân thật của `x`) cho `d ∈ [-8, 7]`. Ngoài khoảng đó giữ đường cũ (3 ufunc) để không đổi gì; ranh giới tại `d = -9, 8` sẽ có bước nhảy hành vi, phải ghi rõ trong doc. Có thể mở rộng khoảng tới ±22 sau (khi đó `10^|d|` vẫn chính xác trong double), không cần ở bước đầu.
+
+Lý do khoảng này gọn: `p = 10^|d| ≤ 10^8` đều **biểu diễn chính xác** ở float32 và float64 (`10^8 = 2^8 · 5^8`, `5^8 = 390625` cần 19 bit) nên tra bảng 9 phần tử, hết cần vòng lặp nhân dần (và hết sai số của `power_of_ten`). float16 không biểu diễn được `p > 65504` nên phải tính trung gian ở dtype rộng hơn.
+
+### 9.1. Vì sao hiện tại không chuẩn
+`rint(x * p) / p` làm tròn tích `x*p` về double **trước** khi `rint`, nên khi giá trị thật rơi sát điểm giữa, sai số làm tròn của phép nhân đẩy sang bên sai. Đã đo (script nháp ở scratchpad, `val_round.py`, so với `round(x, d)` của Python, `d` ngẫu nhiên trong [-8, 7], float64):
+
+| Tập mẫu (300000) | khác Python (thuật toán hiện tại) |
+|---|---|
+| ngẫu nhiên | 0.34% |
+| đúng điểm giữa thập phân (vd 2.675, d=2) | 19.29% |
+| lệch 1 ulp quanh điểm giữa | 1.51% |
+
+### 9.2. Thuật toán đề xuất (đã kiểm chứng toán học bằng script nháp, `val_round2.py`; **không phải bản cài đặt**)
+Dùng `fma` để lấy phần dư **chính xác** của phép nhân/chia, rồi hiệu chỉnh `rint` bằng phần dư đó:
+
+```
+d >= 0: p = 10^d;   s = x * p;  e = fma(x, p, -s)      # e = x*p - s, chính xác
+d <  0: p = 10^-d;  s = x / p;  e = fma(-s, p, x) / p   # x/p - s,   chính xác (sai số ~1e-16)
+nh = rint(s)                       # half-even
+r  = (s - nh) + e                  # phần dư thật so với nh, |r| <= ~0.5
+n  = nh + 1 nếu r > 0.5, hoặc r == 0.5 và nh lẻ
+n  = nh - 1 nếu r < -0.5, hoặc r == -0.5 và nh lẻ
+kết quả = d >= 0 ? n / p : n * p
+nếu !(|s| < 2^53) thì kết quả = x   # ulp(x) >= bước thập phân: x đã là điểm gần nhất
+```
+
+Kết quả script nháp: **0 sai khác** trên 4 × 300000 mẫu (ngẫu nhiên đến 1e17, đúng điểm giữa, lệch 1 ulp quanh điểm giữa, và dải `|s| ∈ [2^52, 2^53)`). Hai lỗi tôi gặp khi thử và đã sửa trong thiết kế: (1) ngưỡng bảo vệ phải là `2^53` chứ không phải `2^52` (ở `2^52 ≤ |s| < 2^53` vẫn cần làm tròn thật; để `2^52` sai 128/300000 mẫu ngẫu nhiên); (2) với `d < 0`, phần dư `e` tính theo đơn vị của `x` nên phải chia cho `p` trước khi cộng vào `r`. Đây là kiểm chứng mẫu, **chưa phải chứng minh**; trước khi tin cần vét cạn: float16 (65536 × 16 giá trị `d`), float32 (2^32 × 16 trong C, ước tính vài phút đến vài chục phút, cần đo), float64 chỉ thử mẫu + tập đối kháng + tham chiếu chính xác bằng số học hữu tỉ (chỉ dùng trong test).
+
+### 9.3. float32 / float16
+Tính trung gian bằng **float64** rồi cast về một lần:
+- `d >= 0`: tích `x * p` (24 bit × 19 bit) nằm gọn trong float64 nên chính xác, không cần `fma`; điểm giữa là điểm giữa thật, `rint` là đủ.
+- `d < 0`: phép chia không chính xác nên vẫn cần phần dư (`fma`).
+- Script nháp: float32 và float16 lệch 0/40000 so với tham chiếu chính xác (mẫu ngẫu nhiên, **chưa vét cạn**; double rounding `f64 → f32` ở bước chia cuối là điểm cần vét cạn bằng test, tôi chưa có chứng minh).
+- float64 trung gian đồng nghĩa số lane SIMD giảm một nửa so với float32; tốc độ phải **đo**, không được giả định.
+
+### 9.4. Chi phí và rủi ro tốc độ (chưa đo gì)
+- Thêm so với `mul + rint + div`: 1 `fma`, 1 phép trừ + cộng, 2 so sánh, 2 chọn (blend). Đổi lại bỏ 2 lượt bộ nhớ và 2 lần dispatch. Phải đo.
+- `fma` cần phần cứng FMA3 (x86 AVX2+FMA3, NEON/ASIMD, VSX...). Mục dispatch hiện tại của `loops_unary_fp` có `X86_V2` (SSE4.2, **không có FMA**). Hai phương án, chọn sau khi đo: (a) thêm target `AVX2`/`FMA3` và dùng đường vô hướng chính xác (hoặc tách Dekker/Veltkamp, vì `p` nhỏ nên tách rẻ) cho baseline; (b) chỉ dùng đường mới khi có FMA, còn lại giữ đường cũ (không đổi hành vi theo CPU là điều không mong muốn, vì kết quả sẽ khác nhau giữa các máy). **Nên chọn (a)**: kết quả phải giống nhau trên mọi CPU.
+- `libm fma()` không có phần cứng rất chậm (mô phỏng phần mềm), tránh dùng trong đường chính.
+
+### 9.5. Hệ quả hành vi (cần maintainer đồng ý)
+- Kết quả đổi cho các giá trị gần điểm giữa; ví dụ trong docstring `np.round(16.055, 2)` (hiện `16.06`, Python `16.05`) sẽ thành `16.05`, và ví dụ `56294995342131.5` với `decimals=3` thành `…131.5`. Phải sửa docstring và thêm release note; có thể code downstream đang phụ thuộc vào kết quả cũ.
+- Bù lại: hết tràn trong khoảng này (#13699), hết `nan` với float16, và `np.round` khớp `round()` của Python.
