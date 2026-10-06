@@ -235,12 +235,12 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
-| #3540 | subtypes and round() | ❌ Còn | `round(decimals=-1)` vẫn trả ndarray thay vì subclass |
-| #6248 | ENH: Implement __round__ special method for ndarrays | ❌ Còn | `round(array)` vẫn TypeError |
-| #9068 | np.ceil and np.floor are inconsistent with math.ceil and math.floor | ❌ Còn | `floor/ceil` vẫn trả float |
-| #9791 | BUG: np.round should fall back on `__round__` for object arrays | ❌ Còn | `np.round` object array vẫn không dùng `__round__` |
-| #13699 | Surprising overflows in np.round of float16. | ❌ Còn | `round(float16(2.0),5)` vẫn ra nan/overflow |
-| #15438 | TypeError when using np.around() on an integer array with in-place opt… | ❌ Còn | `around(int, decimals=-1, out=a)` vẫn UFuncTypeError |
+| #3540 | subtypes and round() | ❌ Còn | Subclass vẫn mất ở một số tổ hợp: int với `decimals=-1` và float với `decimals>=1` trả `ndarray` (int `decimals>=0` và float `decimals=0` giữ subclass). Lỗi phụ 'round(decimals=0) trả cùng bộ nhớ với mảng gốc' không còn (`shares_memory` False) |
+| #6248 | ENH: Implement __round__ special method for ndarrays | ❌ Còn | `round(array)` và `round(array, 0)` vẫn TypeError chung của Python ('doesn't define __round__'). Thảo luận cuối nghiêng về việc thêm `__round__` ném lỗi thông tin rõ ràng khi `ndigits=None`; scalar thì `round(np.float64(2.5))` ra `int` |
+| #9068 | np.ceil and np.floor are inconsistent with math.ceil and math.floor | ❌ Còn | `np.floor/ceil(1.5)` vẫn ra float64; `dtype=int` ném UFuncTypeError; chưa có `iceil/ifloor`. Mới có `np.float64.__floor__` (nên `math.floor(np.float64)` ra `int`). Comment gần nhất (2026-04) đề xuất thêm hàm riêng `iceil/ifloor/iround`. NEP 56 chỉ giữ dtype cho input nguyên |
+| #9791 | BUG: np.round should fall back on `__round__` for object arrays | ❌ Còn | `np.round` trên mảng object không gọi `__round__`: Fraction ra TypeError 'no callable rint method', Decimal có `decimals` ra TypeError (nhân với float) |
+| #13699 | Surprising overflows in np.round of float16. | ❌ Còn | Vẫn tràn trung gian: `round(float16(2.0),5)` ra `nan` kèm RuntimeWarning ('overflow in cast'), `round(float16(1505.1),2)` ra `inf`; float32 (3e38) và float64 (1.5e307) cũng ra `inf` với `decimals=2`, chỉ khác là phải dùng giá trị rất lớn |
+| #15438 | TypeError when using np.around() on an integer array with in-place opt… | ❌ Còn | `around(int_arr, decimals=-1, out=int_arr)` vẫn UFuncTypeError ('divide' float64→int64 same_kind); `out` kiểu float thì chạy. Maintainer cho rằng đúng theo quy tắc `same_kind` của `out`, chỉ thông báo lỗi gây khó hiểu |
 
 ## Ufunc / gufunc machinery (10)
 
