@@ -106,3 +106,11 @@ Dùng ufunc sẽ kéo theo `__array_wrap__`/subclass propagation, có thể làm
 1. Xác minh các điểm "cần kiểm tra" nêu trên (cờ build-dir của spin, loop `HALF_multiply`, xử lý ufunc private, hành vi `p = inf`).
 2. Build baseline stock `main` (release) vào thư mục riêng và lưu số đo + golden set.
 3. Mới tới viết kernel giai đoạn A.
+
+## 8. Phạm vi của `decimals` (đã kiểm trên 2.5.3 và đọc code)
+
+- Kiểu: C `int` (32 bit) qua `PyArray_PythonPyIntFromInt` ([methods.c:2757](numpy/_core/src/multiarray/methods.c#L2757)). Nhận Python int, `np.int8/int64`, bool, mảng 0-d int; từ chối float, str, None (TypeError); `2**31` ném OverflowError. Docstring chỉ ghi `decimals : int`, không ghi khoảng.
+- Phạm vi có nghĩa theo dtype (suy từ min/max/subnormal của dtype, cần xác nhận bằng test): float16 ≈ [-4, +8], float32 ≈ [-38, +45], float64 ≈ [-308, +323]. Ngoài khoảng đó kết quả toán học là `x` (decimals dương) hoặc `0` (decimals âm).
+- Hành vi hiện tại ngoài khoảng là rác: float64 `decimals>=309` hoặc `<=-309` ra `nan`; `decimals=308` ra `inf`; float32 `decimals=100` ra `nan`; float16 `decimals=10` ra `nan`.
+- Kernel chỉ nhận `p = 10^|d|`, không nhận `d`, nên khoảng của `d` không ảnh hưởng tốc độ kernel. Chỉ cần kẹp `d` một lần (O(1)) trong `PyArray_Round` trước khi gọi kernel.
+- `power_of_ten` nhân dần `1e9 * 10 * ...` cho `n >= 9` nên cộng dồn sai số: mô phỏng lại vòng lặp đó cho thấy 240/309 giá trị `10^n` khác `float('1e%d' % n)` (bắt đầu từ n=25, lệch 1 ulp). Chỉ ảnh hưởng `decimals >= 25`; khi thay bằng bảng hằng số thì kết quả cho `decimals` lớn sẽ đổi nhẹ. Cần cân nhắc khi giữ bit-identical ở giai đoạn A (giữ nguyên hàm cũ cho đến PR 2).
