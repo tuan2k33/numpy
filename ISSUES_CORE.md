@@ -231,7 +231,7 @@ Snapshot 2026-10-01: 183 issue đang mở (77 Bug, 57 Enhancement).
 
 ## Rounding (6)
 
-**NEP liên quan:** NEP 56 (Final): `ceil`/`floor`/`trunc` giữ dtype số nguyên khi input là số nguyên (đã kiểm: `np.ceil(int64 array)` giữ int64); nhưng với float vẫn trả float (`np.ceil(1.5)` là `2.0`), nên #9068 vẫn còn. Không NEP nào về `__round__`.
+**NEP liên quan:** NEP 56 (Final) nêu việc `ceil`/`floor`/`trunc` giữ dtype số nguyên khi input là số nguyên; thực tế việc này chỉ có từ numpy 2.1.0 (PR #26766; đã cài 2.0.2 và 2.1.3 để kiểm: 2.0.2 ra float64, 2.1.3 giữ int32); nhưng với float vẫn trả float (`np.ceil(1.5)` là `2.0`), nên #9068 vẫn còn. Không NEP nào về `__round__`.
 
 | Issue | Tiêu đề | Kết luận | Ghi chú |
 |---|---|---|---|
