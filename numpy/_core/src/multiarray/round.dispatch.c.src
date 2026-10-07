@@ -23,7 +23,9 @@
  *     x > T: round up     x < T: round down     x == T: take the even neighbour
  *
  * x == T means the decimal T is the number that x stands for.  Values that are
- * not near a half-way decimal give the same result as before.
+ * not near a half-way decimal give the same result as before, and T (one
+ * extra division) is only computed for vectors that have a lane within the
+ * error of the product of a half-way point.
  *
  * Outside that range (p not exact, or |x * p| too large for n +- 0.5 to be
  * exact) the old rint(x * p) / p is used.
@@ -64,6 +66,7 @@
  * #csign  = npy_copysignf, npy_copysign#
  * #SIGN   = 0x80000000u, 0x8000000000000000ULL#
  * #LIM    = 1048576.0f, 70368744177664.0#
+ * #EPS    = 2.384185791015625e-07f, 4.440892098500626e-16#
  * #PEXACT = 1e10, 1e22#
  * #VCHK   = NPY_SIMD_F32, NPY_SIMD_F64#
  * #STAGE  = 1, 0#
@@ -116,6 +119,7 @@ round_simd_loop_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sd
     const npyv_@sfx@ vone = npyv_setall_@sfx@((@type@)1);
     const npyv_@sfx@ vzero = npyv_setall_@sfx@((@type@)0);
     const npyv_@sfx@ vlim = npyv_setall_@sfx@((@type@)@LIM@);
+    const npyv_@sfx@ veps = npyv_setall_@sfx@((@type@)@EPS@);
     const npyv_@usfx@ vsign = npyv_setall_@usfx@(@SIGN@);
 
     for (; len >= vstep; len -= vstep, src += ssrc*vstep, dst += sdst*vstep) {
@@ -130,28 +134,48 @@ round_simd_loop_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sd
             }
         }
         else {
+            npyv_@sfx@ t = neg ? npyv_div_@sfx@(x, vp) : npyv_mul_@sfx@(x, vp);
             /* NaN lanes are replaced by 0: comparing a NaN raises "invalid" on some targets */
-            npyv_@bsfx@ isnum = npyv_cmpeq_@sfx@(x, x);
-            npyv_@sfx@ xs = npyv_select_@sfx@(isnum, x, vzero);
-            npyv_@sfx@ t = neg ? npyv_div_@sfx@(xs, vp) : npyv_mul_@sfx@(xs, vp);
-            npyv_@sfx@ n = npyv_rint_@sfx@(t);
-            npyv_@bsfx@ small = npyv_cmplt_@sfx@(npyv_abs_@sfx@(t), vlim);
-            /* the half-way decimal on the side of t */
-            npyv_@bsfx@ up = npyv_cmpge_@sfx@(t, n);
-            npyv_@sfx@ h = npyv_add_@sfx@(n, npyv_select_@sfx@(up, vhalf, vnhalf));
-            npyv_@sfx@ T = neg ? npyv_mul_@sfx@(h, vp) : npyv_div_@sfx@(h, vp);
-            npyv_@sfx@ above = npyv_select_@sfx@(npyv_cmpgt_@sfx@(xs, T), npyv_add_@sfx@(n, vone), n);
-            npyv_@sfx@ below = npyv_select_@sfx@(npyv_cmplt_@sfx@(xs, T), npyv_sub_@sfx@(n, vone), n);
-            /* x == T: h is half-way between two integers, rint takes the even one */
-            npyv_@sfx@ m = npyv_select_@sfx@(npyv_cmpeq_@sfx@(xs, T), npyv_rint_@sfx@(h),
-                                             npyv_select_@sfx@(up, above, below));
-            /* outside LIM keep rint(t), the plain formula */
-            m = npyv_select_@sfx@(small, m, n);
-            npyv_@sfx@ res = neg ? npyv_mul_@sfx@(m, vp) : npyv_div_@sfx@(m, vp);
-            /* copysign(res, x) keeps the sign of a zero result */
-            res = npyv_reinterpret_@sfx@_@usfx@(npyv_or_@usfx@(
-                    npyv_reinterpret_@usfx@_@sfx@(npyv_abs_@sfx@(res)),
-                    npyv_and_@usfx@(npyv_reinterpret_@usfx@_@sfx@(xs), vsign)));
+            npyv_@bsfx@ isnum = npyv_cmpeq_@sfx@(t, t);
+            npyv_@sfx@ ts = npyv_select_@sfx@(isnum, t, vzero);
+            npyv_@sfx@ n = npyv_rint_@sfx@(ts);
+            npyv_@sfx@ at = npyv_abs_@sfx@(ts);
+            /* beyond LIM (also inf) only the plain rint(t) is used, and ts - n would be inf - inf */
+            npyv_@bsfx@ small = npyv_cmplt_@sfx@(at, vlim);
+            npyv_@sfx@ ts2 = npyv_select_@sfx@(small, ts, vzero);
+            npyv_@sfx@ n2 = npyv_select_@sfx@(small, n, vzero);
+            /*
+             * rint(t) is only wrong if x is closer to a half-way decimal than
+             * the error of the product, about |t| * 2**-23 (2**-52 for double).
+             * Only then is T needed, so the second division is skipped for
+             * almost all vectors.  EPS is twice that error.
+             */
+            npyv_@bsfx@ near = npyv_and_@bsfx@(small,
+                    npyv_cmpge_@sfx@(npyv_abs_@sfx@(npyv_sub_@sfx@(ts2, n2)),
+                                     npyv_sub_@sfx@(vhalf, npyv_mul_@sfx@(at, veps))));
+            npyv_@sfx@ res;
+            if (npyv_tobits_@bsfx@(near)) {
+                npyv_@sfx@ xs = npyv_select_@sfx@(isnum, x, vzero);
+                /* the half-way decimal on the side of t */
+                npyv_@bsfx@ up = npyv_cmpge_@sfx@(ts2, n2);
+                npyv_@sfx@ h = npyv_add_@sfx@(n2, npyv_select_@sfx@(up, vhalf, vnhalf));
+                npyv_@sfx@ T = neg ? npyv_mul_@sfx@(h, vp) : npyv_div_@sfx@(h, vp);
+                npyv_@sfx@ above = npyv_select_@sfx@(npyv_cmpgt_@sfx@(xs, T), npyv_add_@sfx@(n2, vone), n2);
+                npyv_@sfx@ below = npyv_select_@sfx@(npyv_cmplt_@sfx@(xs, T), npyv_sub_@sfx@(n2, vone), n2);
+                /* x == T: h is half-way between two integers, rint takes the even one */
+                npyv_@sfx@ m = npyv_select_@sfx@(npyv_cmpeq_@sfx@(xs, T), npyv_rint_@sfx@(h),
+                                                 npyv_select_@sfx@(up, above, below));
+                m = npyv_select_@sfx@(near, m, n);
+                res = neg ? npyv_mul_@sfx@(m, vp) : npyv_div_@sfx@(m, vp);
+                /* copysign(res, x) keeps the sign of a zero result */
+                npyv_@sfx@ signed_res = npyv_reinterpret_@sfx@_@usfx@(npyv_or_@usfx@(
+                        npyv_reinterpret_@usfx@_@sfx@(npyv_abs_@sfx@(res)),
+                        npyv_and_@usfx@(npyv_reinterpret_@usfx@_@sfx@(xs), vsign)));
+                res = npyv_select_@sfx@(near, signed_res, res);
+            }
+            else {
+                res = neg ? npyv_mul_@sfx@(n, vp) : npyv_div_@sfx@(n, vp);
+            }
             r = npyv_select_@sfx@(isnum, res, x);
         }
         if (sdst == 1) {
