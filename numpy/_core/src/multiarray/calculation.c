@@ -1,5 +1,6 @@
 #define NPY_NO_DEPRECATED_API NPY_API_VERSION
 #define _MULTIARRAYMODULE
+#define _UMATHMODULE
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
@@ -20,6 +21,8 @@
 
 #include "calculation.h"
 #include "array_assign.h"
+#include "round.h"
+#include "umathmodule.h"
 
 static double
 power_of_ten(int n)
@@ -556,6 +559,120 @@ PyArray_CumProd(PyArrayObject *self, int axis, int rtype, PyArrayObject *out)
     return ret;
 }
 
+/*
+ * Fused rounding of float16/float32/float64 arrays, see round.dispatch.c.src.
+ *
+ * Handles only the common case; everything else keeps using the multiply /
+ * rint / true_divide ufunc sequence below, with its exact previous behavior
+ * (subclasses with an __array_ufunc__ override, byte swapped or unaligned
+ * data, a differently typed ``out``, ...).
+ *
+ * Returns 1 and sets ``*result`` (a new reference, or NULL with an error set)
+ * when handled, 0 when not applicable (nothing was changed).
+ */
+static int
+round_fused(PyArrayObject *a, int decimals, PyArrayObject *out, PyObject **result)
+{
+    typedef void (round_kernel_func)(const char *, npy_intp, char *, npy_intp,
+                                     npy_intp, double, int);
+    round_kernel_func *kernel = NULL;
+
+    if (!PyArray_CheckExact(a) || !PyArray_ISNOTSWAPPED(a) || !PyArray_ISALIGNED(a)) {
+        return 0;
+    }
+    switch (PyArray_TYPE(a)) {
+        case NPY_HALF:
+            NPY_CPU_DISPATCH_CALL(kernel = ROUND_HALF);
+            break;
+        case NPY_FLOAT:
+            NPY_CPU_DISPATCH_CALL(kernel = ROUND_FLOAT);
+            break;
+        case NPY_DOUBLE:
+            NPY_CPU_DISPATCH_CALL(kernel = ROUND_DOUBLE);
+            break;
+        default:
+            return 0;
+    }
+    if (kernel == NULL) {
+        return 0;
+    }
+    if (out != NULL &&
+            (PyArray_TYPE(out) != PyArray_TYPE(a) ||
+             !PyArray_ISNOTSWAPPED(out) || !PyArray_ISALIGNED(out) ||
+             !PyArray_SAMESHAPE(out, a))) {
+        return 0;
+    }
+
+    /* the same scale factor the ufunc sequence used */
+    int neg = decimals < 0;
+    int n = decimals;
+    if (neg) {
+        n = decimals == INT_MIN ? INT_MAX : -decimals;
+    }
+    double p = power_of_ten(n);
+
+    PyArrayObject *res;
+    if (out != NULL) {
+        Py_INCREF(out);
+        res = out;
+    }
+    else {
+        PyArray_Descr *descr = PyArray_DESCR(a);
+        Py_INCREF(descr);
+        res = (PyArrayObject *)PyArray_Empty(PyArray_NDIM(a), PyArray_DIMS(a),
+                                             descr, PyArray_ISFORTRAN(a));
+        if (res == NULL) {
+            *result = NULL;
+            return 1;
+        }
+    }
+
+    PyArrayObject *op[2] = {a, res};
+    npy_uint32 op_flags[2] = {
+        NPY_ITER_READONLY | NPY_ITER_OVERLAP_ASSUME_ELEMENTWISE,
+        NPY_ITER_WRITEONLY | NPY_ITER_OVERLAP_ASSUME_ELEMENTWISE};
+    NpyIter *iter = NpyIter_MultiNew(2, op,
+            NPY_ITER_EXTERNAL_LOOP | NPY_ITER_GROWINNER |
+            NPY_ITER_ZEROSIZE_OK | NPY_ITER_COPY_IF_OVERLAP,
+            NPY_KEEPORDER, NPY_NO_CASTING, op_flags, NULL);
+    if (iter == NULL) {
+        Py_DECREF(res);
+        *result = NULL;
+        return 1;
+    }
+    int fpes = 0;
+    npy_intp size = NpyIter_GetIterSize(iter);
+    if (size > 0) {
+        NpyIter_IterNextFunc *iternext = NpyIter_GetIterNext(iter, NULL);
+        if (iternext == NULL) {
+            NpyIter_Deallocate(iter);
+            Py_DECREF(res);
+            *result = NULL;
+            return 1;
+        }
+        char **dataptr = NpyIter_GetDataPtrArray(iter);
+        npy_intp *strides = NpyIter_GetInnerStrideArray(iter);
+        npy_intp *countptr = NpyIter_GetInnerLoopSizePtr(iter);
+        NPY_BEGIN_THREADS_DEF;
+        NPY_BEGIN_THREADS_THRESHOLDED(size);
+        npy_clear_floatstatus_barrier((char *)&iter);
+        do {
+            kernel(dataptr[0], strides[0], dataptr[1], strides[1],
+                   *countptr, p, neg);
+        } while (iternext(iter));
+        fpes = npy_get_floatstatus_barrier((char *)&iter);
+        NPY_END_THREADS;
+    }
+    if (NpyIter_Deallocate(iter) != NPY_SUCCEED ||
+            (fpes && PyUFunc_GiveFloatingpointErrors("round", fpes) < 0)) {
+        Py_DECREF(res);
+        *result = NULL;
+        return 1;
+    }
+    *result = (PyObject *)res;
+    return 1;
+}
+
 /*NUMPY_API
  * Round
  */
@@ -588,48 +705,36 @@ PyArray_Round(PyArrayObject *a, int decimals, PyArrayObject *out)
             }
         }
 
-        /* arr.real = a.real.round(decimals) */
-        part = PyObject_GetAttrString((PyObject *)a, "real");
-        if (part == NULL) {
-            Py_DECREF(arr);
-            return NULL;
-        }
-        part = PyArray_EnsureAnyArray(part);
-        round_part = PyArray_Round((PyArrayObject *)part,
-                                   decimals, NULL);
-        Py_DECREF(part);
-        if (round_part == NULL) {
-            Py_DECREF(arr);
-            return NULL;
-        }
-        res = PyObject_SetAttrString(arr, "real", round_part);
-        Py_DECREF(round_part);
-        if (res < 0) {
-            Py_DECREF(arr);
-            return NULL;
-        }
-
-        /* arr.imag = a.imag.round(decimals) */
-        part = PyObject_GetAttrString((PyObject *)a, "imag");
-        if (part == NULL) {
-            Py_DECREF(arr);
-            return NULL;
-        }
-        part = PyArray_EnsureAnyArray(part);
-        round_part = PyArray_Round((PyArrayObject *)part,
-                                   decimals, NULL);
-        Py_DECREF(part);
-        if (round_part == NULL) {
-            Py_DECREF(arr);
-            return NULL;
-        }
-        res = PyObject_SetAttrString(arr, "imag", round_part);
-        Py_DECREF(round_part);
-        if (res < 0) {
-            Py_DECREF(arr);
-            return NULL;
+        static const char *const part_names[2] = {"real", "imag"};
+        for (int i = 0; i < 2; i++) {
+            /* arr.<part> = a.<part>.round(decimals) */
+            part = PyObject_GetAttrString((PyObject *)a, part_names[i]);
+            if (part == NULL) {
+                Py_DECREF(arr);
+                return NULL;
+            }
+            part = PyArray_EnsureAnyArray(part);
+            round_part = PyArray_Round((PyArrayObject *)part,
+                                       decimals, NULL);
+            Py_DECREF(part);
+            if (round_part == NULL) {
+                Py_DECREF(arr);
+                return NULL;
+            }
+            res = PyObject_SetAttrString(arr, part_names[i], round_part);
+            Py_DECREF(round_part);
+            if (res < 0) {
+                Py_DECREF(arr);
+                return NULL;
+            }
         }
         return arr;
+    }
+    if (decimals != 0) {
+        PyObject *fused;
+        if (round_fused(a, decimals, out, &fused)) {
+            return fused;
+        }
     }
     if (decimals != 0 && PyArray_CheckExact(a) && PyArray_TYPE(a) == NPY_HALF &&
             (out == NULL ||
@@ -726,6 +831,7 @@ PyArray_Round(PyArrayObject *a, int decimals, PyArrayObject *out)
     }
     f = PyFloat_FromDouble(power_of_ten(decimals));
     if (f == NULL) {
+        Py_DECREF(out);
         return NULL;
     }
     PyObject *args1[3] = {(PyObject *)a, f, (PyObject *)out};

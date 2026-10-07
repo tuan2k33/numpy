@@ -1,0 +1,213 @@
+/* -*- c -*- */
+/*
+ * Fused kernel for ``ndarray.round(decimals)`` on float16/float32/float64.
+ *
+ * ``round`` used to run three ufunc passes over the whole array,
+ *
+ *     decimals >= 0:  multiply(a, p), rint, true_divide(., p)
+ *     decimals <  0:  true_divide(a, p), rint, multiply(., p)       p = 10**|decimals|
+ *
+ * each one reading and writing the array.  Here the three operations are done
+ * in registers in one pass, with exactly the same IEEE operations in the same
+ * order, so float32 and float64 results are bit-identical to the three-pass
+ * version.
+ *
+ * float16 has no arithmetic in hardware and the old loops converted every
+ * element to float32 and back to float16 after *each* of the three passes,
+ * which is slow and also overflows in the intermediate product (``x * p`` is
+ * stored as float16, i.e. inf above 65504, and ``p`` itself was converted to
+ * float16, i.e. inf for 10**5 and more).  Here a block of float16 values is
+ * converted to float32 once, rounded as float32 and converted back once.
+ */
+#define NPY_NO_DEPRECATED_API NPY_API_VERSION
+
+#include "simd/simd.h"
+#include "numpy/npy_math.h"
+#include "numpy/halffloat.h"
+
+#include "round.h"
+
+#if defined(__F16C__) && defined(__AVX2__)
+    #include <immintrin.h>
+    #define ROUND_HAVE_F16C 1
+#else
+    #define ROUND_HAVE_F16C 0
+#endif
+
+/* elements staged through a contiguous buffer for strided data */
+#define ROUND_BLOCK 256
+
+/**begin repeat
+ * #TYPE  = FLOAT, DOUBLE#
+ * #type  = float, double#
+ * #sfx   = f32, f64#
+ * #rint  = npy_rintf, npy_rint#
+ * #VCHK  = NPY_SIMD_F32, NPY_SIMD_F64#
+ * #STAGE = 1, 0#
+ */
+static NPY_INLINE @type@
+round_scalar_@sfx@(@type@ x, @type@ p, int neg)
+{
+    return neg ? @rint@(x / p) * p : @rint@(x * p) / p;
+}
+
+#if @VCHK@
+/* ``neg`` is a compile time constant after inlining: one loop per direction */
+NPY_FINLINE void
+round_simd_loop_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sdst,
+                      npy_intp len, @type@ p, const int neg)
+{
+    const int vstep = npyv_nlanes_@sfx@;
+    const npyv_@sfx@ vp = npyv_setall_@sfx@(p);
+
+    for (; len >= vstep; len -= vstep, src += ssrc*vstep, dst += sdst*vstep) {
+        npyv_@sfx@ x = ssrc == 1 ? npyv_load_@sfx@(src) : npyv_loadn_@sfx@(src, ssrc);
+        npyv_@sfx@ r;
+        if (neg) {
+            r = npyv_mul_@sfx@(npyv_rint_@sfx@(npyv_div_@sfx@(x, vp)), vp);
+        }
+        else {
+            r = npyv_div_@sfx@(npyv_rint_@sfx@(npyv_mul_@sfx@(x, vp)), vp);
+        }
+        if (sdst == 1) {
+            npyv_store_@sfx@(dst, r);
+        }
+        else {
+            npyv_storen_@sfx@(dst, sdst, r);
+        }
+    }
+    for (; len > 0; --len, src += ssrc, dst += sdst) {
+        *dst = round_scalar_@sfx@(*src, p, neg);
+    }
+    npyv_cleanup();
+}
+#endif  // @VCHK@
+
+NPY_NO_EXPORT void
+NPY_CPU_DISPATCH_CURFX(ROUND_@TYPE@)(const char *src, npy_intp src_stride,
+                                     char *dst, npy_intp dst_stride,
+                                     npy_intp len, double pd, int neg)
+{
+    const @type@ p = (@type@)pd;
+#if @VCHK@
+    const npy_intp lsize = sizeof(@type@);
+    if (src_stride % lsize == 0 && dst_stride % lsize == 0) {
+        const npy_intp ss = src_stride / lsize;
+        const npy_intp ds = dst_stride / lsize;
+#if @STAGE@
+        if (ss != 1 || ds != 1) {
+            /*
+             * float32 with strided input or output: strided SIMD loads and
+             * stores are gathers or emulated, which made this slower than the
+             * old three pass version.  Move the strides in plain scalar loops
+             * and run the contiguous kernel on a block.
+             */
+            @type@ buf[ROUND_BLOCK];
+            const @type@ *s = (const @type@ *)src;
+            @type@ *d = (@type@ *)dst;
+            while (len > 0) {
+                npy_intp n = len < ROUND_BLOCK ? len : ROUND_BLOCK;
+                const @type@ *in = s;
+                @type@ *out = d;
+                if (ss != 1) {
+                    for (npy_intp i = 0; i < n; i++) {
+                        buf[i] = s[i * ss];
+                    }
+                    in = buf;
+                }
+                if (ds != 1) {
+                    out = buf;
+                }
+                if (neg) {
+                    round_simd_loop_@sfx@(in, 1, out, 1, n, p, 1);
+                }
+                else {
+                    round_simd_loop_@sfx@(in, 1, out, 1, n, p, 0);
+                }
+                if (ds != 1) {
+                    for (npy_intp i = 0; i < n; i++) {
+                        d[i * ds] = buf[i];
+                    }
+                }
+                s += n * ss;
+                d += n * ds;
+                len -= n;
+            }
+            return;
+        }
+#endif
+        if (npyv_loadable_stride_@sfx@(src_stride) &&
+                npyv_storable_stride_@sfx@(dst_stride)) {
+            if (neg) {
+                round_simd_loop_@sfx@((const @type@ *)src, ss, (@type@ *)dst, ds, len, p, 1);
+            }
+            else {
+                round_simd_loop_@sfx@((const @type@ *)src, ss, (@type@ *)dst, ds, len, p, 0);
+            }
+            return;
+        }
+    }
+#endif
+    for (; len > 0; --len, src += src_stride, dst += dst_stride) {
+        *(@type@ *)dst = round_scalar_@sfx@(*(const @type@ *)src, p, neg);
+    }
+}
+/**end repeat**/
+
+/*
+ * float16: convert a block to float32, round it there, convert back once.
+ */
+#define ROUND_HALF_BLOCK 512
+
+static NPY_INLINE void
+round_half_to_float(const char *src, npy_intp stride, float *buf, npy_intp n)
+{
+    npy_intp i = 0;
+#if ROUND_HAVE_F16C
+    if (stride == (npy_intp)sizeof(npy_half)) {
+        for (; i + 8 <= n; i += 8) {
+            __m128i h = _mm_loadu_si128((const __m128i *)(src + i * 2));
+            _mm256_storeu_ps(buf + i, _mm256_cvtph_ps(h));
+        }
+    }
+#endif
+    for (; i < n; i++) {
+        buf[i] = npy_half_to_float(*(const npy_half *)(src + i * stride));
+    }
+}
+
+static NPY_INLINE void
+round_float_to_half(const float *buf, char *dst, npy_intp stride, npy_intp n)
+{
+    npy_intp i = 0;
+#if ROUND_HAVE_F16C
+    if (stride == (npy_intp)sizeof(npy_half)) {
+        for (; i + 8 <= n; i += 8) {
+            __m128i h = _mm256_cvtps_ph(_mm256_loadu_ps(buf + i), _MM_FROUND_TO_NEAREST_INT);
+            _mm_storeu_si128((__m128i *)(dst + i * 2), h);
+        }
+    }
+#endif
+    for (; i < n; i++) {
+        *(npy_half *)(dst + i * stride) = npy_float_to_half(buf[i]);
+    }
+}
+
+NPY_NO_EXPORT void
+NPY_CPU_DISPATCH_CURFX(ROUND_HALF)(const char *src, npy_intp src_stride,
+                                   char *dst, npy_intp dst_stride,
+                                   npy_intp len, double p, int neg)
+{
+    float buf[ROUND_HALF_BLOCK];
+    while (len > 0) {
+        npy_intp n = len < ROUND_HALF_BLOCK ? len : ROUND_HALF_BLOCK;
+        round_half_to_float(src, src_stride, buf, n);
+        /* in place on the block; ``buf`` is contiguous float32 */
+        NPY_CPU_DISPATCH_CURFX(ROUND_FLOAT)((const char *)buf, sizeof(float),
+                                            (char *)buf, sizeof(float), n, p, neg);
+        round_float_to_half(buf, dst, dst_stride, n);
+        src += n * src_stride;
+        dst += n * dst_stride;
+        len -= n;
+    }
+}

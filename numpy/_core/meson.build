@@ -933,6 +933,16 @@ foreach gen_mtargets : [
       VXE, VX
     ]
   ],
+  [
+    'round.dispatch.h',
+    src_file.process('src/multiarray/round.dispatch.c.src'),
+    [
+      X86_V4, X86_V3, X86_V2,
+      VSX2,
+      ASIMD, NEON,
+      VXE, VX
+    ]
+  ],
 ]
   mtargets = mod_features.multi_targets(
     gen_mtargets[0], multiarray_gen_headers + gen_mtargets[1],

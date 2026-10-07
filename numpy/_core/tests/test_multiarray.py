@@ -2271,6 +2271,60 @@ class TestMethods:
         assert a.flags.f_contiguous
         assert np.round(a).flags.f_contiguous
 
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    @pytest.mark.parametrize("decimals", [-3, -1, 1, 2, 5, 9])
+    def test_round_matches_ufunc_sequence(self, dt, decimals):
+        # round is rint(x * 10**d) / 10**d (rint(x / 10**-d) * 10**-d for
+        # negative d) evaluated in the array dtype; the fused loop must give
+        # exactly the same results, also for non-contiguous input and out.
+        rng = np.random.default_rng(1234)
+        special = [0., -0., np.inf, -np.inf, np.nan, 2.5, 3.5, 2.675, 1e30]
+        a = np.concatenate([rng.uniform(-1000, 1000, 1000), special]).astype(dt)
+        p = dt(10.0 ** abs(decimals))
+        with np.errstate(all="ignore"):
+            if decimals < 0:
+                expected = np.rint(a / p) * p
+            else:
+                expected = np.rint(a * p) / p
+
+        def check(res, exp):
+            assert_array_equal(res, exp)
+            assert_array_equal(np.signbit(res), np.signbit(exp))
+
+        with np.errstate(all="ignore"):
+            check(np.round(a, decimals), expected)
+            check(np.round(a[::-1], decimals), expected[::-1])
+            check(np.round(a[::3], decimals), expected[::3])
+            f = np.asfortranarray(a[:1000].reshape(40, 25))
+            res = np.round(f, decimals)
+            check(res, expected[:1000].reshape(40, 25))
+            assert res.flags.f_contiguous
+            out = np.empty_like(a)
+            assert np.round(a, decimals, out=out) is out
+            check(out, expected)
+            # strided output, and strided input and output at once
+            sout = np.empty(2 * a.size, dtype=a.dtype)[::2]
+            assert np.round(a, decimals, out=sout) is sout
+            check(sout, expected)
+            sout = np.empty(3 * len(a[::3]), dtype=a.dtype)[::3]
+            assert np.round(a[::3], decimals, out=sout) is sout
+            check(sout, expected[::3])
+            b = a.copy()
+            assert np.round(b, decimals, out=b) is b
+            check(b, expected)
+            b = a.copy()
+            np.round(b[1:], decimals, out=b[:-1])  # overlapping
+            check(b[:-1], expected[1:])
+
+    @pytest.mark.parametrize("n", range(40))
+    def test_round_short_arrays(self, n):
+        # vector remainders / scalar tails
+        a = np.linspace(-5.123, 5.987, 40)[:n]
+        for dt in (np.float16, np.float32, np.float64):
+            x = a.astype(dt)
+            assert_array_equal(np.round(x, 1), np.concatenate(
+                [np.round(x[i:i + 1], 1) for i in range(n)] or [x]))
+
     @pytest.mark.parametrize("decimals", [-3, 2, 5, 7])
     def test_round_float16(self, decimals):
         # gh-13699: float16 computed ``x * 10**decimals`` in float16, which
@@ -2312,6 +2366,35 @@ class TestMethods:
         assert res.flags.f_contiguous
         assert res.dtype == np.float16
         assert_array_equal(res, np.round(a.astype(np.float32), 1).astype(np.float16))
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_round_overflow_is_reported(self, dt):
+        # x * 10**decimals overflows: still reported through the errstate
+        a = np.array([np.finfo(dt).max, 1.0], dtype=dt)
+        with pytest.warns(RuntimeWarning, match="overflow"):
+            res = np.round(a, 1)
+        assert np.isinf(res[0])
+        with np.errstate(over="ignore"):
+            np.round(a, 1)
+        with np.errstate(over="raise"):
+            with pytest.raises(FloatingPointError):
+                np.round(a, 1)
+
+    def test_round_not_applicable_paths(self):
+        # subclasses, byte swapped, unaligned input and differently typed out
+        # keep working (they take the generic path)
+        a = np.linspace(-1000, 1000, 101)
+        expected = np.round(a, 2)
+        assert_array_equal(np.round(a.astype(">f8"), 2), expected)
+        raw = np.zeros(8 * 101 + 1, np.uint8)
+        un = raw[1:].view(np.float64)
+        un[:] = a
+        assert not un.flags.aligned
+        assert_array_equal(np.round(un, 2), expected)
+        m = np.ma.array(a, mask=[0, 1] * 50 + [0])
+        assert isinstance(np.round(m, 2), np.ma.MaskedArray)
+        out = np.empty(101, np.float32)
+        assert np.round(a, 2, out=out) is out
 
     def test_squeeze(self):
         a = np.array([[[1], [2], [3]]])

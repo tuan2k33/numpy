@@ -145,6 +145,7 @@ class SmallMethodDispatch(Benchmark):
         np.cumsum(self.a)
 
     def time_round(self):
+        # integer input: only copies the array, see also the ``Round`` class
         np.round(self.a, 2)
 
     def time_argsort_list(self):
@@ -154,6 +155,28 @@ class SmallMethodDispatch(Benchmark):
     def time_cumsum_list(self):
         # list input exercises the _wrapit conversion fallback
         np.cumsum(self.lst)
+
+
+class Round(Benchmark):
+    # np.round on floating point arrays (float16 is much slower than the rest)
+    params = [[np.float16, np.float32, np.float64],
+              [-2, 2, 6],
+              [1000, 100_000, 1_000_000]]
+    param_names = ['dtype', 'decimals', 'size']
+
+    def setup(self, dtype, decimals, size):
+        rng = np.random.default_rng(12345)
+        self.a = (rng.random(size) * 200 - 100).astype(dtype)
+        self.out = np.empty_like(self.a)
+
+    def time_round(self, dtype, decimals, size):
+        np.round(self.a, decimals)
+
+    def time_round_out(self, dtype, decimals, size):
+        np.round(self.a, decimals, out=self.out)
+
+    def time_round_strided(self, dtype, decimals, size):
+        np.round(self.a[::2], decimals)
 
 
 class Temporaries(Benchmark):
