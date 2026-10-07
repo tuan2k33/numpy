@@ -7,10 +7,26 @@
  *     decimals >= 0:  multiply(a, p), rint, true_divide(., p)
  *     decimals <  0:  true_divide(a, p), rint, multiply(., p)       p = 10**|decimals|
  *
- * each one reading and writing the array.  Here the three operations are done
- * in registers in one pass, with exactly the same IEEE operations in the same
- * order, so float32 and float64 results are bit-identical to the three-pass
- * version.
+ * each one reading and writing the array.  Here the work is done in registers
+ * in one pass.
+ *
+ * ``rint(x * p)`` has a flaw that is not in rint: ``x * p`` is rounded before
+ * rint sees it, so a value like 2.675 (stored slightly below 2.675) can land on
+ * exactly 267.5 and be rounded half-to-even to 2.68, while 1.015 lands on
+ * 101.49999999999999 and gives 1.01, although both are the same kind of
+ * half-way decimal.  The product is therefore only used to estimate the result
+ * n = rint(t), and the decision is taken against the half-way decimal next to
+ * t, T = (n +- 0.5) / p.  T is computed with one correctly rounded operation
+ * (n +- 0.5 is exact, and so is p up to 10**10 for float32 and 10**22 for
+ * float64), so it is the same float that the literal "2.675" is parsed to:
+ *
+ *     x > T: round up     x < T: round down     x == T: take the even neighbour
+ *
+ * x == T means the decimal T is the number that x stands for.  Values that are
+ * not near a half-way decimal give the same result as before.
+ *
+ * Outside that range (p not exact, or |x * p| too large for n +- 0.5 to be
+ * exact) the old rint(x * p) / p is used.
  *
  * float16 has no arithmetic in hardware and the old loops converted every
  * element to float32 and back to float16 after *each* of the three passes,
@@ -38,36 +54,105 @@
 #define ROUND_BLOCK 256
 
 /**begin repeat
- * #TYPE  = FLOAT, DOUBLE#
- * #type  = float, double#
- * #sfx   = f32, f64#
- * #rint  = npy_rintf, npy_rint#
- * #VCHK  = NPY_SIMD_F32, NPY_SIMD_F64#
- * #STAGE = 1, 0#
+ * #TYPE   = FLOAT, DOUBLE#
+ * #type   = float, double#
+ * #sfx    = f32, f64#
+ * #usfx   = u32, u64#
+ * #bsfx   = b32, b64#
+ * #rint   = npy_rintf, npy_rint#
+ * #fabs   = npy_fabsf, npy_fabs#
+ * #csign  = npy_copysignf, npy_copysign#
+ * #SIGN   = 0x80000000u, 0x8000000000000000ULL#
+ * #LIM    = 1048576.0f, 70368744177664.0#
+ * #PEXACT = 1e10, 1e22#
+ * #VCHK   = NPY_SIMD_F32, NPY_SIMD_F64#
+ * #STAGE  = 1, 0#
+ */
+
+/*
+ * One element.  ``mid`` selects the half-way rule described at the top, else
+ * the plain rint(x * p) / p.  Must give the same bits as the SIMD loop below.
+ *
+ * LIM is 2**20 / 2**46.  Below it n +- 0.5 is exact and t is within 1/8 of the
+ * exact product.  The rule also needs the floats near x to be much closer
+ * together than the half-way decimals (1 / p), otherwise several of them round
+ * to the same float and "x == T" no longer says that x stands for the decimal
+ * T.  The closer |t| gets to 2**23 / 2**52 the more often that happens, and
+ * above LIM the plain formula was measured to be at least as good.
  */
 static NPY_INLINE @type@
-round_scalar_@sfx@(@type@ x, @type@ p, int neg)
+round_scalar_@sfx@(@type@ x, @type@ p, int neg, int mid)
 {
-    return neg ? @rint@(x / p) * p : @rint@(x * p) / p;
+    if (mid && x != x) {
+        return x;
+    }
+    @type@ t = neg ? x / p : x * p;
+    @type@ n = @rint@(t);
+    if (mid && @fabs@(t) < (@type@)@LIM@) {
+        const int up = t >= n;
+        const @type@ h = n + (up ? (@type@)0.5 : (@type@)-0.5);
+        const @type@ T = neg ? h * p : h / p;
+        if (x == T) {
+            n = @rint@(h);          /* half-way: the even neighbour */
+        }
+        else if (up ? x > T : x < T) {
+            n = up ? n + (@type@)1 : n - (@type@)1;
+        }
+        return @csign@(neg ? n * p : n / p, x);
+    }
+    return neg ? n * p : n / p;
 }
 
 #if @VCHK@
-/* ``neg`` is a compile time constant after inlining: one loop per direction */
+/* ``neg`` and ``mid`` are compile time constants after inlining */
 NPY_FINLINE void
 round_simd_loop_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sdst,
-                      npy_intp len, @type@ p, const int neg)
+                      npy_intp len, @type@ p, const int neg, const int mid)
 {
     const int vstep = npyv_nlanes_@sfx@;
     const npyv_@sfx@ vp = npyv_setall_@sfx@(p);
+    const npyv_@sfx@ vhalf = npyv_setall_@sfx@((@type@)0.5);
+    const npyv_@sfx@ vnhalf = npyv_setall_@sfx@((@type@)-0.5);
+    const npyv_@sfx@ vone = npyv_setall_@sfx@((@type@)1);
+    const npyv_@sfx@ vzero = npyv_setall_@sfx@((@type@)0);
+    const npyv_@sfx@ vlim = npyv_setall_@sfx@((@type@)@LIM@);
+    const npyv_@usfx@ vsign = npyv_setall_@usfx@(@SIGN@);
 
     for (; len >= vstep; len -= vstep, src += ssrc*vstep, dst += sdst*vstep) {
         npyv_@sfx@ x = ssrc == 1 ? npyv_load_@sfx@(src) : npyv_loadn_@sfx@(src, ssrc);
         npyv_@sfx@ r;
-        if (neg) {
-            r = npyv_mul_@sfx@(npyv_rint_@sfx@(npyv_div_@sfx@(x, vp)), vp);
+        if (!mid) {
+            if (neg) {
+                r = npyv_mul_@sfx@(npyv_rint_@sfx@(npyv_div_@sfx@(x, vp)), vp);
+            }
+            else {
+                r = npyv_div_@sfx@(npyv_rint_@sfx@(npyv_mul_@sfx@(x, vp)), vp);
+            }
         }
         else {
-            r = npyv_div_@sfx@(npyv_rint_@sfx@(npyv_mul_@sfx@(x, vp)), vp);
+            /* NaN lanes are replaced by 0: comparing a NaN raises "invalid" on some targets */
+            npyv_@bsfx@ isnum = npyv_cmpeq_@sfx@(x, x);
+            npyv_@sfx@ xs = npyv_select_@sfx@(isnum, x, vzero);
+            npyv_@sfx@ t = neg ? npyv_div_@sfx@(xs, vp) : npyv_mul_@sfx@(xs, vp);
+            npyv_@sfx@ n = npyv_rint_@sfx@(t);
+            npyv_@bsfx@ small = npyv_cmplt_@sfx@(npyv_abs_@sfx@(t), vlim);
+            /* the half-way decimal on the side of t */
+            npyv_@bsfx@ up = npyv_cmpge_@sfx@(t, n);
+            npyv_@sfx@ h = npyv_add_@sfx@(n, npyv_select_@sfx@(up, vhalf, vnhalf));
+            npyv_@sfx@ T = neg ? npyv_mul_@sfx@(h, vp) : npyv_div_@sfx@(h, vp);
+            npyv_@sfx@ above = npyv_select_@sfx@(npyv_cmpgt_@sfx@(xs, T), npyv_add_@sfx@(n, vone), n);
+            npyv_@sfx@ below = npyv_select_@sfx@(npyv_cmplt_@sfx@(xs, T), npyv_sub_@sfx@(n, vone), n);
+            /* x == T: h is half-way between two integers, rint takes the even one */
+            npyv_@sfx@ m = npyv_select_@sfx@(npyv_cmpeq_@sfx@(xs, T), npyv_rint_@sfx@(h),
+                                             npyv_select_@sfx@(up, above, below));
+            /* outside LIM keep rint(t), the plain formula */
+            m = npyv_select_@sfx@(small, m, n);
+            npyv_@sfx@ res = neg ? npyv_mul_@sfx@(m, vp) : npyv_div_@sfx@(m, vp);
+            /* copysign(res, x) keeps the sign of a zero result */
+            res = npyv_reinterpret_@sfx@_@usfx@(npyv_or_@usfx@(
+                    npyv_reinterpret_@usfx@_@sfx@(npyv_abs_@sfx@(res)),
+                    npyv_and_@usfx@(npyv_reinterpret_@usfx@_@sfx@(xs), vsign)));
+            r = npyv_select_@sfx@(isnum, res, x);
         }
         if (sdst == 1) {
             npyv_store_@sfx@(dst, r);
@@ -77,9 +162,31 @@ round_simd_loop_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sd
         }
     }
     for (; len > 0; --len, src += ssrc, dst += sdst) {
-        *dst = round_scalar_@sfx@(*src, p, neg);
+        *dst = round_scalar_@sfx@(*src, p, neg, mid);
     }
     npyv_cleanup();
+}
+
+NPY_FINLINE void
+round_run_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sdst,
+                npy_intp len, @type@ p, int neg, int mid)
+{
+    if (neg) {
+        if (mid) {
+            round_simd_loop_@sfx@(src, ssrc, dst, sdst, len, p, 1, 1);
+        }
+        else {
+            round_simd_loop_@sfx@(src, ssrc, dst, sdst, len, p, 1, 0);
+        }
+    }
+    else {
+        if (mid) {
+            round_simd_loop_@sfx@(src, ssrc, dst, sdst, len, p, 0, 1);
+        }
+        else {
+            round_simd_loop_@sfx@(src, ssrc, dst, sdst, len, p, 0, 0);
+        }
+    }
 }
 #endif  // @VCHK@
 
@@ -89,6 +196,8 @@ NPY_CPU_DISPATCH_CURFX(ROUND_@TYPE@)(const char *src, npy_intp src_stride,
                                      npy_intp len, double pd, int neg)
 {
     const @type@ p = (@type@)pd;
+    /* the half-way rule needs p = 10**|decimals| exact */
+    const int mid = pd <= @PEXACT@;
 #if @VCHK@
     const npy_intp lsize = sizeof(@type@);
     if (src_stride % lsize == 0 && dst_stride % lsize == 0) {
@@ -118,12 +227,7 @@ NPY_CPU_DISPATCH_CURFX(ROUND_@TYPE@)(const char *src, npy_intp src_stride,
                 if (ds != 1) {
                     out = buf;
                 }
-                if (neg) {
-                    round_simd_loop_@sfx@(in, 1, out, 1, n, p, 1);
-                }
-                else {
-                    round_simd_loop_@sfx@(in, 1, out, 1, n, p, 0);
-                }
+                round_run_@sfx@(in, 1, out, 1, n, p, neg, mid);
                 if (ds != 1) {
                     for (npy_intp i = 0; i < n; i++) {
                         d[i * ds] = buf[i];
@@ -138,18 +242,13 @@ NPY_CPU_DISPATCH_CURFX(ROUND_@TYPE@)(const char *src, npy_intp src_stride,
 #endif
         if (npyv_loadable_stride_@sfx@(src_stride) &&
                 npyv_storable_stride_@sfx@(dst_stride)) {
-            if (neg) {
-                round_simd_loop_@sfx@((const @type@ *)src, ss, (@type@ *)dst, ds, len, p, 1);
-            }
-            else {
-                round_simd_loop_@sfx@((const @type@ *)src, ss, (@type@ *)dst, ds, len, p, 0);
-            }
+            round_run_@sfx@((const @type@ *)src, ss, (@type@ *)dst, ds, len, p, neg, mid);
             return;
         }
     }
 #endif
     for (; len > 0; --len, src += src_stride, dst += dst_stride) {
-        *(@type@ *)dst = round_scalar_@sfx@(*(const @type@ *)src, p, neg);
+        *(@type@ *)dst = round_scalar_@sfx@(*(const @type@ *)src, p, neg, mid);
     }
 }
 /**end repeat**/

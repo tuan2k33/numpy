@@ -2274,9 +2274,10 @@ class TestMethods:
     @pytest.mark.parametrize("dt", [np.float32, np.float64])
     @pytest.mark.parametrize("decimals", [-3, -1, 1, 2, 5, 9])
     def test_round_matches_ufunc_sequence(self, dt, decimals):
-        # round is rint(x * 10**d) / 10**d (rint(x / 10**-d) * 10**-d for
-        # negative d) evaluated in the array dtype; the fused loop must give
-        # exactly the same results, also for non-contiguous input and out.
+        # Away from half-way decimals round is rint(x * 10**d) / 10**d
+        # (rint(x / 10**-d) * 10**-d for negative d) evaluated in the array
+        # dtype.  The inputs here are random, so the fused loop must give
+        # exactly that, also for non-contiguous input and out.
         rng = np.random.default_rng(1234)
         special = [0., -0., np.inf, -np.inf, np.nan, 2.5, 3.5, 2.675, 1e30]
         a = np.concatenate([rng.uniform(-1000, 1000, 1000), special]).astype(dt)
@@ -2315,6 +2316,58 @@ class TestMethods:
             b = a.copy()
             np.round(b[1:], decimals, out=b[:-1])  # overlapping
             check(b[:-1], expected[1:])
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_round_halfway_decimals(self, dt):
+        # A decimal that ends in 5 right after the last kept digit is half-way
+        # and rounds to the even neighbour, also when x * 10**d does not land
+        # on an exact .5 (1.015 * 100 = 101.49999999999999, 8.345 * 100 =
+        # 834.5000000000001).
+        from decimal import ROUND_HALF_EVEN, Decimal
+        rng = np.random.default_rng(99)
+        for decimals in (-2, -1, 1, 2, 3, 4):
+            k = 10.0 ** -decimals
+            if decimals > 0:
+                n = rng.integers(-5000, 5000, 400)
+                text = [f"{(10 * v + 5) / 10 ** (decimals + 1):.{decimals + 1}f}"
+                        for v in n]
+            else:
+                n = rng.integers(-500, 500, 400)
+                text = [str(int((10 * v + 5) * k / 10)) for v in n]
+            a = np.array([float(t) for t in text], dtype=dt)
+            expected = np.array(
+                [float(Decimal(t).quantize(Decimal(1).scaleb(-decimals),
+                                           rounding=ROUND_HALF_EVEN))
+                 for t in text], dtype=dt)
+            res = np.round(a, decimals)
+            assert_array_equal(res, expected)
+            # the scalar tail and the vector loop must agree
+            single = np.concatenate([np.round(a[i:i + 1], decimals)
+                                     for i in range(a.size)])
+            assert_array_equal(res, single)
+            assert_array_equal(np.round(a[::-1], decimals), expected[::-1])
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_round_halfway_examples(self, dt):
+        a = np.array([2.675, 2.665, 1.015, 8.345, 1.115, 1.005, 0.125, -2.675],
+                     dtype=dt)
+        expected = np.array([2.68, 2.66, 1.02, 8.34, 1.12, 1.0, 0.12, -2.68],
+                            dtype=dt)
+        assert_array_equal(np.round(a, 2), expected)
+        for i in range(a.size):
+            assert_array_equal(np.round(a[i:i + 1], 2), expected[i:i + 1])
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_round_special_values(self, dt):
+        a = np.array([np.nan, np.inf, -np.inf, -0.0, 0.0, -0.001, 0.001] * 3,
+                     dtype=dt)
+        for decimals in (-2, 2):
+            with np.errstate(all="raise"):
+                res = np.round(a, decimals)
+            assert_array_equal(np.isnan(res), np.isnan(a))
+            assert_array_equal(res[~np.isnan(a)], np.round(
+                a[~np.isnan(a)], decimals))
+            assert_array_equal(np.signbit(res[3:7]), [True, False, True, False])
 
     @pytest.mark.parametrize("n", range(40))
     def test_round_short_arrays(self, n):
