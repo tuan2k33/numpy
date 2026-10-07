@@ -30,6 +30,11 @@
  * Outside that range (p not exact, or |x * p| too large for n +- 0.5 to be
  * exact) the old rint(x * p) / p is used.
  *
+ * Once |x * p| >= 2**53 (2**24 for float32) the half-way decimals are at least
+ * as close together as the floats near x, so the result is x itself; the old
+ * formula returned x +- an ulp or worse (gh-20514).  This is checked on the
+ * rounded product and does not depend on p being exact.
+ *
  * float16 has no arithmetic in hardware and the old loops converted every
  * element to float32 and back to float16 after *each* of the three passes,
  * which is slow and also overflows in the intermediate product (``x * p`` is
@@ -52,6 +57,16 @@
     #define ROUND_HAVE_F16C 0
 #endif
 
+/*
+ * AVX compares are "ordered, quiet" and do not raise "invalid" for a NaN; SSE,
+ * NEON and the others may, so NaN lanes are replaced by 0 before comparing.
+ */
+#if defined(NPY_HAVE_AVX)
+    #define ROUND_QUIET_CMP 1
+#else
+    #define ROUND_QUIET_CMP 0
+#endif
+
 /* elements staged through a contiguous buffer for strided data */
 #define ROUND_BLOCK 256
 
@@ -67,6 +82,8 @@
  * #SIGN   = 0x80000000u, 0x8000000000000000ULL#
  * #LIM    = 1048576.0f, 70368744177664.0#
  * #EPS    = 2.384185791015625e-07f, 4.440892098500626e-16#
+ * #BIG    = 16777216.0f, 9007199254740992.0#
+ * #INF    = NPY_INFINITYF, NPY_INFINITY#
  * #PEXACT = 1e10, 1e22#
  * #VCHK   = NPY_SIMD_F32, NPY_SIMD_F64#
  * #STAGE  = 1, 0#
@@ -86,11 +103,14 @@
 static NPY_INLINE @type@
 round_scalar_@sfx@(@type@ x, @type@ p, int neg, int mid)
 {
-    if (mid && x != x) {
+    if (x != x) {
         return x;
     }
     @type@ t = neg ? x / p : x * p;
     @type@ n = @rint@(t);
+    if (@fabs@(t) >= (@type@)@BIG@ && @fabs@(t) < (@type@)@INF@) {
+        return x;
+    }
     if (mid && @fabs@(t) < (@type@)@LIM@) {
         const int up = t >= n;
         const @type@ h = n + (up ? (@type@)0.5 : (@type@)-0.5);
@@ -120,24 +140,35 @@ round_simd_loop_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sd
     const npyv_@sfx@ vzero = npyv_setall_@sfx@((@type@)0);
     const npyv_@sfx@ vlim = npyv_setall_@sfx@((@type@)@LIM@);
     const npyv_@sfx@ veps = npyv_setall_@sfx@((@type@)@EPS@);
+    const npyv_@sfx@ vbig = npyv_setall_@sfx@((@type@)@BIG@);
+    const npyv_@sfx@ vinf = npyv_setall_@sfx@((@type@)@INF@);
     const npyv_@usfx@ vsign = npyv_setall_@usfx@(@SIGN@);
 
     for (; len >= vstep; len -= vstep, src += ssrc*vstep, dst += sdst*vstep) {
         npyv_@sfx@ x = ssrc == 1 ? npyv_load_@sfx@(src) : npyv_loadn_@sfx@(src, ssrc);
         npyv_@sfx@ r;
         if (!mid) {
-            if (neg) {
-                r = npyv_mul_@sfx@(npyv_rint_@sfx@(npyv_div_@sfx@(x, vp)), vp);
-            }
-            else {
-                r = npyv_div_@sfx@(npyv_rint_@sfx@(npyv_mul_@sfx@(x, vp)), vp);
-            }
+            npyv_@sfx@ t = neg ? npyv_div_@sfx@(x, vp) : npyv_mul_@sfx@(x, vp);
+#if ROUND_QUIET_CMP
+            npyv_@sfx@ at = npyv_abs_@sfx@(t);
+#else
+            npyv_@bsfx@ isnum = npyv_cmpeq_@sfx@(t, t);
+            npyv_@sfx@ at = npyv_abs_@sfx@(npyv_select_@sfx@(isnum, t, vzero));
+#endif
+            npyv_@bsfx@ big = npyv_and_@bsfx@(npyv_cmpge_@sfx@(at, vbig), npyv_cmplt_@sfx@(at, vinf));
+            npyv_@sfx@ n = npyv_rint_@sfx@(t);
+            r = neg ? npyv_mul_@sfx@(n, vp) : npyv_div_@sfx@(n, vp);
+            r = npyv_select_@sfx@(big, x, r);
         }
         else {
             npyv_@sfx@ t = neg ? npyv_div_@sfx@(x, vp) : npyv_mul_@sfx@(x, vp);
+#if ROUND_QUIET_CMP
+            npyv_@sfx@ ts = t;
+#else
             /* NaN lanes are replaced by 0: comparing a NaN raises "invalid" on some targets */
             npyv_@bsfx@ isnum = npyv_cmpeq_@sfx@(t, t);
             npyv_@sfx@ ts = npyv_select_@sfx@(isnum, t, vzero);
+#endif
             npyv_@sfx@ n = npyv_rint_@sfx@(ts);
             npyv_@sfx@ at = npyv_abs_@sfx@(ts);
             /* beyond LIM (also inf) only the plain rint(t) is used, and ts - n would be inf - inf */
@@ -155,7 +186,11 @@ round_simd_loop_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sd
                                      npyv_sub_@sfx@(vhalf, npyv_mul_@sfx@(at, veps))));
             npyv_@sfx@ res;
             if (npyv_tobits_@bsfx@(near)) {
+#if ROUND_QUIET_CMP
+                npyv_@sfx@ xs = x;
+#else
                 npyv_@sfx@ xs = npyv_select_@sfx@(isnum, x, vzero);
+#endif
                 /* the half-way decimal on the side of t */
                 npyv_@bsfx@ up = npyv_cmpge_@sfx@(ts2, n2);
                 npyv_@sfx@ h = npyv_add_@sfx@(n2, npyv_select_@sfx@(up, vhalf, vnhalf));
@@ -176,7 +211,18 @@ round_simd_loop_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sd
             else {
                 res = neg ? npyv_mul_@sfx@(n, vp) : npyv_div_@sfx@(n, vp);
             }
+            if (npyv_tobits_@bsfx@(small) != ((npy_uint64)1 << vstep) - 1) {
+                /* some lane has |t| >= LIM; from BIG on the half-way decimals are
+                 * closer together than the floats near x, so x is the answer */
+                npyv_@bsfx@ big = npyv_and_@bsfx@(npyv_cmpge_@sfx@(at, vbig),
+                                                  npyv_cmplt_@sfx@(at, vinf));
+                res = npyv_select_@sfx@(big, x, res);
+            }
+#if ROUND_QUIET_CMP
+            r = res;
+#else
             r = npyv_select_@sfx@(isnum, res, x);
+#endif
         }
         if (sdst == 1) {
             npyv_store_@sfx@(dst, r);

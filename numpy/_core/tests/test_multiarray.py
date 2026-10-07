@@ -2284,9 +2284,16 @@ class TestMethods:
         p = dt(10.0 ** abs(decimals))
         with np.errstate(all="ignore"):
             if decimals < 0:
-                expected = np.rint(a / p) * p
+                t = a / p
+                expected = np.rint(t) * p
             else:
-                expected = np.rint(a * p) / p
+                t = a * p
+                expected = np.rint(t) / p
+            # beyond 2**53 (2**24) the half-way decimals are finer than the
+            # floats and x is returned as it is, see
+            # test_round_large_values_unchanged
+            limit = 2.0 ** (24 if dt is np.float32 else 53)
+            expected = np.where(np.isfinite(t) & (np.abs(t) >= limit), a, expected)
 
         def check(res, exp):
             assert_array_equal(res, exp)
@@ -2356,6 +2363,24 @@ class TestMethods:
         assert_array_equal(np.round(a, 2), expected)
         for i in range(a.size):
             assert_array_equal(np.round(a[i:i + 1], 2), expected[i:i + 1])
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_round_large_values_unchanged(self, dt):
+        # gh-20514: when |x * 10**decimals| >= 2**53 (2**24 for float32) the
+        # half-way decimals are as close together as the floats near x, so
+        # x is already the answer.  It used to change by an ulp or more.
+        rng = np.random.default_rng(5)
+        big = 2.0 ** (24 if dt is np.float32 else 53)
+        for decimals in (-3, -1, 1, 2, 5):
+            p = 10.0 ** abs(decimals)
+            scale = big * p if decimals < 0 else big / p
+            x = (np.where(rng.random(500) < .5, -1, 1)
+                 * scale * (1.5 + rng.random(500) * 100)).astype(dt)
+            assert_array_equal(np.round(x, decimals), x)
+            for i in range(5):  # the scalar tail
+                assert_array_equal(np.round(x[i:i + 1], decimals), x[i:i + 1])
+        assert np.round(3061040371728385.0, 2) == 3061040371728385.0
+        assert np.round(6.2768919806476296e16, 1) == 6.2768919806476296e16
 
     @pytest.mark.parametrize("dt", [np.float32, np.float64])
     def test_round_special_values(self, dt):
