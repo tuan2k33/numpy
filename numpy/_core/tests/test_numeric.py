@@ -225,8 +225,9 @@ class TestNonarrayArgs:
             np.reshape(arr_f_ord, shape, order="C", copy=False)
 
     def test_round(self):
+        # 6.35 is 6.3499999999999996..., so it rounds down like the builtin
         arr = [1.56, 72.54, 6.35, 3.25]
-        tgt = [1.6, 72.5, 6.4, 3.2]
+        tgt = [1.6, 72.5, 6.3, 3.2]
         assert_equal(np.around(arr, decimals=1), tgt)
         s = np.float64(1.)
         assert_(isinstance(s.round(), np.float64))

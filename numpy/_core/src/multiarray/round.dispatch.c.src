@@ -11,29 +11,30 @@
  * in one pass.
  *
  * ``rint(x * p)`` has a flaw that is not in rint: ``x * p`` is rounded before
- * rint sees it, so a value like 2.675 (stored slightly below 2.675) can land on
- * exactly 267.5 and be rounded half-to-even to 2.68, while 1.015 lands on
- * 101.49999999999999 and gives 1.01, although both are the same kind of
- * half-way decimal.  The product is therefore only used to estimate the result
- * n = rint(t), and the decision is taken against the half-way decimal next to
- * t, T = (n +- 0.5) / p.  T is computed with one correctly rounded operation
- * (n +- 0.5 is exact, and so is p up to 10**10 for float32 and 10**22 for
- * float64), so it is the same float that the literal "2.675" is parsed to:
+ * rint sees it, so a value like 2.675 (stored as 2.67499999999999982...) lands
+ * on exactly 267.5 and is rounded half-to-even to 2.68, while the builtin
+ * ``round(2.675, 2)`` gives 2.67.  Only if t = x * p is exactly half way
+ * between two integers can rint be wrong, and then the rounding error of the
+ * product says which side the exact x * p is on:
  *
- *     x > T: round up     x < T: round down     x == T: take the even neighbour
+ *     e = fma(x, p, -t)  =  x * p - t, exactly
+ *     e > 0: round up     e < 0: round down     e == 0: a true tie, take even
  *
- * x == T means the decimal T is the number that x stands for.  Values that are
- * not near a half-way decimal give the same result as before, and T (one
- * extra division) is only computed for vectors that have a lane within the
- * error of the product of a half-way point.
+ * (for decimals < 0, t = x / p and e = fma(-t, p, x) = x - t * p).  Any t that
+ * is not half way cannot be moved across a half-way point by an error of half
+ * an ulp, so rint(t) is right and the fast path below needs no fma at all.
+ * Only vectors that contain a lane with t exactly half way take the scalar
+ * path with fma(), which is exact everywhere (libm falls back to a software
+ * version where the CPU has no FMA), so the result does not depend on the CPU.
+ * The result is the same as rounding the exact binary value of x, which is
+ * what the builtin ``round`` does.
  *
- * Outside that range (p not exact, or |x * p| too large for n +- 0.5 to be
- * exact) the old rint(x * p) / p is used.
+ * This needs p = 10**|decimals| to be exact, i.e. up to 10**10 for float32 and
+ * 10**22 for float64; beyond that the plain rint(x * p) / p is used.
  *
- * Once |x * p| >= 2**53 (2**24 for float32) the half-way decimals are at least
- * as close together as the floats near x, so the result is x itself; the old
- * formula returned x +- an ulp or worse (gh-20514).  This is checked on the
- * rounded product and does not depend on p being exact.
+ * Once |x * p| >= 2**53 (2**24 for float32) the floats near x are coarser than
+ * 10**-decimals, so the result is x itself; the old formula returned
+ * x +- an ulp or worse (gh-20514).
  *
  * float16 has no arithmetic in hardware and the old loops converted every
  * element to float32 and back to float16 after *each* of the three passes,
@@ -46,6 +47,8 @@
 
 #include "simd/simd.h"
 #include "numpy/npy_math.h"
+
+#include <math.h>
 #include "numpy/halffloat.h"
 
 #include "round.h"
@@ -78,10 +81,9 @@
  * #bsfx   = b32, b64#
  * #rint   = npy_rintf, npy_rint#
  * #fabs   = npy_fabsf, npy_fabs#
+ * #fma    = fmaf, fma#
  * #csign  = npy_copysignf, npy_copysign#
  * #SIGN   = 0x80000000u, 0x8000000000000000ULL#
- * #LIM    = 1048576.0f, 70368744177664.0#
- * #EPS    = 2.384185791015625e-07f, 4.440892098500626e-16#
  * #BIG    = 16777216.0f, 9007199254740992.0#
  * #INF    = NPY_INFINITYF, NPY_INFINITY#
  * #PEXACT = 1e10, 1e22#
@@ -90,36 +92,29 @@
  */
 
 /*
- * One element.  ``mid`` selects the half-way rule described at the top, else
+ * One element.  ``tie`` selects the fma correction described at the top, else
  * the plain rint(x * p) / p.  Must give the same bits as the SIMD loop below.
- *
- * LIM is 2**20 / 2**46.  Below it n +- 0.5 is exact and t is within 1/8 of the
- * exact product.  The rule also needs the floats near x to be much closer
- * together than the half-way decimals (1 / p), otherwise several of them round
- * to the same float and "x == T" no longer says that x stands for the decimal
- * T.  The closer |t| gets to 2**23 / 2**52 the more often that happens, and
- * above LIM the plain formula was measured to be at least as good.
  */
 static NPY_INLINE @type@
-round_scalar_@sfx@(@type@ x, @type@ p, int neg, int mid)
+round_scalar_@sfx@(@type@ x, @type@ p, int neg, int tie)
 {
     if (x != x) {
         return x;
     }
     @type@ t = neg ? x / p : x * p;
     @type@ n = @rint@(t);
-    if (@fabs@(t) >= (@type@)@BIG@ && @fabs@(t) < (@type@)@INF@) {
-        return x;
+    if (@fabs@(t) >= (@type@)@BIG@) {
+        /* an overflowed t stays inf, as it always did, and is reported */
+        return @fabs@(t) < (@type@)@INF@ ? x : (neg ? n * p : n / p);
     }
-    if (mid && @fabs@(t) < (@type@)@LIM@) {
-        const int up = t >= n;
-        const @type@ h = n + (up ? (@type@)0.5 : (@type@)-0.5);
-        const @type@ T = neg ? h * p : h / p;
-        if (x == T) {
-            n = @rint@(h);          /* half-way: the even neighbour */
+    if (tie && @fabs@(t - n) == (@type@)0.5) {
+        /* t is exactly half way; the error of t says where x * p really is */
+        const @type@ e = neg ? @fma@(-t, p, x) : @fma@(x, p, -t);
+        if (e > 0) {
+            n = t + (@type@)0.5;
         }
-        else if (up ? x > T : x < T) {
-            n = up ? n + (@type@)1 : n - (@type@)1;
+        else if (e < 0) {
+            n = t - (@type@)0.5;
         }
         return @csign@(neg ? n * p : n / p, x);
     }
@@ -127,122 +122,85 @@ round_scalar_@sfx@(@type@ x, @type@ p, int neg, int mid)
 }
 
 #if @VCHK@
-/* ``neg`` and ``mid`` are compile time constants after inlining */
+/* ``neg`` and ``tie`` are compile time constants after inlining */
 NPY_FINLINE void
 round_simd_loop_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sdst,
-                      npy_intp len, @type@ p, const int neg, const int mid)
+                      npy_intp len, @type@ p, const int neg, const int tie)
 {
     const int vstep = npyv_nlanes_@sfx@;
     const npyv_@sfx@ vp = npyv_setall_@sfx@(p);
     const npyv_@sfx@ vhalf = npyv_setall_@sfx@((@type@)0.5);
-    const npyv_@sfx@ vnhalf = npyv_setall_@sfx@((@type@)-0.5);
-    const npyv_@sfx@ vone = npyv_setall_@sfx@((@type@)1);
     const npyv_@sfx@ vzero = npyv_setall_@sfx@((@type@)0);
-    const npyv_@sfx@ vlim = npyv_setall_@sfx@((@type@)@LIM@);
-    const npyv_@sfx@ veps = npyv_setall_@sfx@((@type@)@EPS@);
+#if NPY_SIMD_FMA3
+    const npyv_@usfx@ vsign = npyv_setall_@usfx@(@SIGN@);
+#endif
     const npyv_@sfx@ vbig = npyv_setall_@sfx@((@type@)@BIG@);
     const npyv_@sfx@ vinf = npyv_setall_@sfx@((@type@)@INF@);
-    const npyv_@usfx@ vsign = npyv_setall_@usfx@(@SIGN@);
 
     for (; len >= vstep; len -= vstep, src += ssrc*vstep, dst += sdst*vstep) {
         npyv_@sfx@ x = ssrc == 1 ? npyv_load_@sfx@(src) : npyv_loadn_@sfx@(src, ssrc);
-        npyv_@sfx@ r;
-        if (!mid) {
-            npyv_@sfx@ t = neg ? npyv_div_@sfx@(x, vp) : npyv_mul_@sfx@(x, vp);
+        npyv_@sfx@ t = neg ? npyv_div_@sfx@(x, vp) : npyv_mul_@sfx@(x, vp);
 #if ROUND_QUIET_CMP
-            npyv_@sfx@ at = npyv_abs_@sfx@(t);
+        npyv_@sfx@ ts = t;
 #else
-            npyv_@bsfx@ isnum = npyv_cmpeq_@sfx@(t, t);
-            npyv_@sfx@ at = npyv_abs_@sfx@(npyv_select_@sfx@(isnum, t, vzero));
+        /* NaN lanes are replaced by 0: comparing a NaN raises "invalid" on some targets */
+        npyv_@bsfx@ isnum = npyv_cmpeq_@sfx@(t, t);
+        npyv_@sfx@ ts = npyv_select_@sfx@(isnum, t, vzero);
 #endif
-            npyv_@bsfx@ big = npyv_and_@bsfx@(npyv_cmpge_@sfx@(at, vbig), npyv_cmplt_@sfx@(at, vinf));
-            npyv_@sfx@ n = npyv_rint_@sfx@(t);
-            r = neg ? npyv_mul_@sfx@(n, vp) : npyv_div_@sfx@(n, vp);
-            r = npyv_select_@sfx@(big, x, r);
-        }
-        else {
-            npyv_@sfx@ t = neg ? npyv_div_@sfx@(x, vp) : npyv_mul_@sfx@(x, vp);
-#if ROUND_QUIET_CMP
-            npyv_@sfx@ ts = t;
+        npyv_@sfx@ n = npyv_rint_@sfx@(ts);
+        npyv_@sfx@ at = npyv_abs_@sfx@(ts);
+        npyv_@sfx@ r = neg ? npyv_mul_@sfx@(n, vp) : npyv_div_@sfx@(n, vp);
+        /* from BIG on x is coarser than 10**-decimals: x is the answer (an overflowed t stays inf) */
+        r = npyv_select_@sfx@(npyv_and_@bsfx@(npyv_cmpge_@sfx@(at, vbig), npyv_cmplt_@sfx@(at, vinf)), x, r);
+        /* t - n only where t is below BIG: inf - inf would raise "invalid" */
+        npyv_@bsfx@ small = npyv_cmplt_@sfx@(at, vbig);
+        npyv_@sfx@ frac = npyv_abs_@sfx@(npyv_sub_@sfx@(npyv_select_@sfx@(small, ts, vzero),
+                                                       npyv_select_@sfx@(small, n, vzero)));
+        npyv_@bsfx@ ties = npyv_cmpeq_@sfx@(frac, vhalf);
+        if (tie && npyv_tobits_@bsfx@(ties)) {
+#if NPY_SIMD_FMA3
+            /* a lane is exactly half way: the error of t says which side the exact x * p is on */
+            npyv_@sfx@ e = neg ? npyv_nmuladd_@sfx@(ts, vp, x) : npyv_mulsub_@sfx@(x, vp, ts);
+            npyv_@sfx@ m = npyv_select_@sfx@(npyv_cmpgt_@sfx@(e, vzero), npyv_add_@sfx@(ts, vhalf),
+                           npyv_select_@sfx@(npyv_cmplt_@sfx@(e, vzero), npyv_sub_@sfx@(ts, vhalf), n));
+            m = neg ? npyv_mul_@sfx@(m, vp) : npyv_div_@sfx@(m, vp);
+            /* copysign(m, x) keeps the sign of a zero result */
+            m = npyv_reinterpret_@sfx@_@usfx@(npyv_or_@usfx@(
+                    npyv_reinterpret_@usfx@_@sfx@(npyv_abs_@sfx@(m)),
+                    npyv_and_@usfx@(npyv_reinterpret_@usfx@_@sfx@(x), vsign)));
+            r = npyv_select_@sfx@(ties, m, r);
 #else
-            /* NaN lanes are replaced by 0: comparing a NaN raises "invalid" on some targets */
-            npyv_@bsfx@ isnum = npyv_cmpeq_@sfx@(t, t);
-            npyv_@sfx@ ts = npyv_select_@sfx@(isnum, t, vzero);
-#endif
-            npyv_@sfx@ n = npyv_rint_@sfx@(ts);
-            npyv_@sfx@ at = npyv_abs_@sfx@(ts);
-            /* beyond LIM (also inf) only the plain rint(t) is used, and ts - n would be inf - inf */
-            npyv_@bsfx@ small = npyv_cmplt_@sfx@(at, vlim);
-            npyv_@sfx@ ts2 = npyv_select_@sfx@(small, ts, vzero);
-            npyv_@sfx@ n2 = npyv_select_@sfx@(small, n, vzero);
-            /*
-             * rint(t) is only wrong if x is closer to a half-way decimal than
-             * the error of the product, about |t| * 2**-23 (2**-52 for double).
-             * Only then is T needed, so the second division is skipped for
-             * almost all vectors.  EPS is twice that error.
-             */
-            npyv_@bsfx@ near = npyv_and_@bsfx@(small,
-                    npyv_cmpge_@sfx@(npyv_abs_@sfx@(npyv_sub_@sfx@(ts2, n2)),
-                                     npyv_sub_@sfx@(vhalf, npyv_mul_@sfx@(at, veps))));
-            npyv_@sfx@ res;
-            if (npyv_tobits_@bsfx@(near)) {
-#if ROUND_QUIET_CMP
-                npyv_@sfx@ xs = x;
-#else
-                npyv_@sfx@ xs = npyv_select_@sfx@(isnum, x, vzero);
-#endif
-                /* the half-way decimal on the side of t */
-                npyv_@bsfx@ up = npyv_cmpge_@sfx@(ts2, n2);
-                npyv_@sfx@ h = npyv_add_@sfx@(n2, npyv_select_@sfx@(up, vhalf, vnhalf));
-                npyv_@sfx@ T = neg ? npyv_mul_@sfx@(h, vp) : npyv_div_@sfx@(h, vp);
-                npyv_@sfx@ above = npyv_select_@sfx@(npyv_cmpgt_@sfx@(xs, T), npyv_add_@sfx@(n2, vone), n2);
-                npyv_@sfx@ below = npyv_select_@sfx@(npyv_cmplt_@sfx@(xs, T), npyv_sub_@sfx@(n2, vone), n2);
-                /* x == T: h is half-way between two integers, rint takes the even one */
-                npyv_@sfx@ m = npyv_select_@sfx@(npyv_cmpeq_@sfx@(xs, T), npyv_rint_@sfx@(h),
-                                                 npyv_select_@sfx@(up, above, below));
-                m = npyv_select_@sfx@(near, m, n);
-                res = neg ? npyv_mul_@sfx@(m, vp) : npyv_div_@sfx@(m, vp);
-                /* copysign(res, x) keeps the sign of a zero result */
-                npyv_@sfx@ signed_res = npyv_reinterpret_@sfx@_@usfx@(npyv_or_@usfx@(
-                        npyv_reinterpret_@usfx@_@sfx@(npyv_abs_@sfx@(res)),
-                        npyv_and_@usfx@(npyv_reinterpret_@usfx@_@sfx@(xs), vsign)));
-                res = npyv_select_@sfx@(near, signed_res, res);
+            /* no hardware fma: redo this vector with the scalar code, whose fma() is exact everywhere */
+            for (int i = 0; i < vstep; i++) {
+                dst[i * sdst] = round_scalar_@sfx@(src[i * ssrc], p, neg, 1);
             }
-            else {
-                res = neg ? npyv_mul_@sfx@(n, vp) : npyv_div_@sfx@(n, vp);
-            }
-            if (npyv_tobits_@bsfx@(small) != ((npy_uint64)1 << vstep) - 1) {
-                /* some lane has |t| >= LIM; from BIG on the half-way decimals are
-                 * closer together than the floats near x, so x is the answer */
-                npyv_@bsfx@ big = npyv_and_@bsfx@(npyv_cmpge_@sfx@(at, vbig),
-                                                  npyv_cmplt_@sfx@(at, vinf));
-                res = npyv_select_@sfx@(big, x, res);
-            }
-#if ROUND_QUIET_CMP
-            r = res;
-#else
-            r = npyv_select_@sfx@(isnum, res, x);
+            continue;
 #endif
         }
+#if ROUND_QUIET_CMP
+        npyv_@sfx@ out = r;
+#else
+        npyv_@sfx@ out = npyv_select_@sfx@(isnum, r, x);
+#endif
         if (sdst == 1) {
-            npyv_store_@sfx@(dst, r);
+            npyv_store_@sfx@(dst, out);
         }
         else {
-            npyv_storen_@sfx@(dst, sdst, r);
+            npyv_storen_@sfx@(dst, sdst, out);
         }
     }
     for (; len > 0; --len, src += ssrc, dst += sdst) {
-        *dst = round_scalar_@sfx@(*src, p, neg, mid);
+        *dst = round_scalar_@sfx@(*src, p, neg, tie);
     }
     npyv_cleanup();
 }
 
 NPY_FINLINE void
 round_run_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sdst,
-                npy_intp len, @type@ p, int neg, int mid)
+                npy_intp len, @type@ p, int neg, int tie)
 {
     if (neg) {
-        if (mid) {
+        if (tie) {
             round_simd_loop_@sfx@(src, ssrc, dst, sdst, len, p, 1, 1);
         }
         else {
@@ -250,7 +208,7 @@ round_run_@sfx@(const @type@ *src, npy_intp ssrc, @type@ *dst, npy_intp sdst,
         }
     }
     else {
-        if (mid) {
+        if (tie) {
             round_simd_loop_@sfx@(src, ssrc, dst, sdst, len, p, 0, 1);
         }
         else {
@@ -266,8 +224,8 @@ NPY_CPU_DISPATCH_CURFX(ROUND_@TYPE@)(const char *src, npy_intp src_stride,
                                      npy_intp len, double pd, int neg)
 {
     const @type@ p = (@type@)pd;
-    /* the half-way rule needs p = 10**|decimals| exact */
-    const int mid = pd <= @PEXACT@;
+    /* the fma correction needs p = 10**|decimals| exact */
+    const int tie = pd <= @PEXACT@;
 #if @VCHK@
     const npy_intp lsize = sizeof(@type@);
     if (src_stride % lsize == 0 && dst_stride % lsize == 0) {
@@ -297,7 +255,7 @@ NPY_CPU_DISPATCH_CURFX(ROUND_@TYPE@)(const char *src, npy_intp src_stride,
                 if (ds != 1) {
                     out = buf;
                 }
-                round_run_@sfx@(in, 1, out, 1, n, p, neg, mid);
+                round_run_@sfx@(in, 1, out, 1, n, p, neg, tie);
                 if (ds != 1) {
                     for (npy_intp i = 0; i < n; i++) {
                         d[i * ds] = buf[i];
@@ -312,13 +270,13 @@ NPY_CPU_DISPATCH_CURFX(ROUND_@TYPE@)(const char *src, npy_intp src_stride,
 #endif
         if (npyv_loadable_stride_@sfx@(src_stride) &&
                 npyv_storable_stride_@sfx@(dst_stride)) {
-            round_run_@sfx@((const @type@ *)src, ss, (@type@ *)dst, ds, len, p, neg, mid);
+            round_run_@sfx@((const @type@ *)src, ss, (@type@ *)dst, ds, len, p, neg, tie);
             return;
         }
     }
 #endif
     for (; len > 0; --len, src += src_stride, dst += dst_stride) {
-        *(@type@ *)dst = round_scalar_@sfx@(*(const @type@ *)src, p, neg, mid);
+        *(@type@ *)dst = round_scalar_@sfx@(*(const @type@ *)src, p, neg, tie);
     }
 }
 /**end repeat**/
