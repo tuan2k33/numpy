@@ -1,0 +1,7 @@
+ninja: Entering directory `/home/tuannq/work/np-base/build-rel'
+[1/3] Generating numpy/generate-version with a custom command
+Saving version to numpy/version.py
+[2/3] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_multiarray_calculation.c.o
+[3/3] Linking target numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /mnt/c/Dev/projects/numpy/.venv/bin/ninja -C /home/tuannq/work/np-base/build-rel -j 12

@@ -1,0 +1,321 @@
+$ /mnt/c/Dev/projects/numpy/.venv/bin/python3 vendored-meson/meson/meson.py compile -j 16 -C build-rel
+ninja: Entering directory `/home/tuannq/work/np-base/build-rel'
+[0/1] Regenerating build files
+Cleaning... 0 files.
+The Meson build system
+Version: 1.11.1
+Source dir: /home/tuannq/work/np-base
+Build dir: /home/tuannq/work/np-base/build-rel
+Build type: native build
+Project name: NumPy
+Project version: 2.6.0.dev0
+C compiler for the host machine: /usr/bin/ccache cc (gcc 15.2.0 "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0")
+C linker for the host machine: cc ld.bfd 2.46
+C++ compiler for the host machine: /usr/bin/ccache c++ (gcc 15.2.0 "c++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0")
+C++ linker for the host machine: c++ ld.bfd 2.46
+Cython compiler for the host machine: cython (cython 3.3.0)
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Program python3 found: YES (/mnt/c/Dev/projects/numpy/.venv/bin/python3)
+Has header "Python.h" with dependency python-3.14: YES (cached)
+Compiler for C supports arguments -fno-strict-aliasing: YES (cached)
+Test features "X86_V2" : Supported (cached)
+Test features "X86_V3" : Supported (cached)
+Test features "X86_V4" : Supported (cached)
+Test features "AVX512_ICL" : Supported (cached)
+Test features "AVX512_SPR" : Supported (cached)
+Configuring npy_cpu_dispatch_config.h using configuration
+Message: 
+CPU Optimization Options
+  baseline:
+    Requested : min
+    Enabled   : X86_V2
+  dispatch:
+    Requested : max
+    Enabled   : X86_V3 X86_V4 AVX512_ICL AVX512_SPR
+
+Library m found: YES
+Found pkg-config: YES (/usr/bin/pkg-config) 2.5.1
+Run-time dependency scipy-openblas found: NO  (tried pkg-config)
+Run-time dependency mkl found: NO  (tried pkg-config and system)
+Run-time dependency mkl found: NO  (tried pkg-config and system)
+Did not find CMake 'cmake'
+Found CMake: NO
+Run-time dependency openblas found: NO  (tried pkg-config, pkg-config, pkg-config, system and cmake)
+Run-time dependency flexiblas found: NO  (tried pkg-config and cmake)
+Run-time dependency blis found: NO  (tried pkg-config and cmake)
+Run-time dependency blas found: NO  (tried pkg-config and system)
+Run-time dependency mkl found: NO  (tried pkg-config and system)
+Run-time dependency openblas found: NO  (tried pkg-config, pkg-config, pkg-config, system and cmake)
+Run-time dependency flexiblas found: NO  (tried pkg-config and cmake)
+Run-time dependency lapack found: NO  (tried pkg-config and system)
+Checking if "Check atomic builtins without -latomic" links: YES (cached)
+Program _build_utils/process_src_template.py found: YES (/home/tuannq/work/np-base/numpy/_build_utils/process_src_template.py)
+Program _build_utils/tempita.py found: YES (/home/tuannq/work/np-base/numpy/_build_utils/tempita.py)
+Configuring __config__.py using configuration
+../numpy/meson.build:460: WARNING: The variable(s) 'BLAS_INCLUDEDIR', 'BLAS_LIBDIR', 'BLAS_OPENBLAS_CONFIG', 'BLAS_PCFILEDIR', 'BLAS_TYPE_NAME', 'BLAS_VERSION', 'LAPACK_INCLUDEDIR', 'LAPACK_LIBDIR', 'LAPACK_OPENBLAS_CONFIG', 'LAPACK_PCFILEDIR', 'LAPACK_TYPE_NAME', 'LAPACK_VERSION' in the input file 'numpy/__config__.py.in' are not present in the given configuration data.
+Checking for size of "short" : 2 (cached)
+Checking for size of "int" : 4 (cached)
+Checking for size of "long" : 8 (cached)
+Checking for size of "long long" : 8 (cached)
+Checking for size of "float" : 4 (cached)
+Checking for size of "double" : 8 (cached)
+Checking for size of "long double" : 16 (cached)
+Checking for size of "size_t" : 8 (cached)
+Checking for size of "size_t" : 8 (cached)
+Checking for size of "wchar_t" : 4 (cached)
+Checking for size of "off_t" : 8 (cached)
+Checking for size of "Py_intptr_t" with dependency python-3.14: 8 (cached)
+Checking for size of "PY_LONG_LONG" with dependency python-3.14: 8 (cached)
+Has header "complex.h" : YES (cached)
+Checking for type "complex float" : YES (cached)
+Checking for size of "complex float" : 8 (cached)
+Checking for type "complex double" : YES (cached)
+Checking for size of "complex double" : 16 (cached)
+Checking for type "complex long double" : YES (cached)
+Checking for size of "complex long double" : 32 (cached)
+Checking if "mandatory libm functions (batched)" with dependency -lm links: YES (cached)
+Checking if "C99 complex funcs (batched)" with dependency -lm links: YES (cached)
+Checking for function "isfinite" with dependency -lm: YES (cached)
+Header "Python.h" has symbol "isfinite" with dependency python-3.14: YES (cached)
+Checking for function "isinf" with dependency -lm: YES (cached)
+Header "Python.h" has symbol "isinf" with dependency python-3.14: YES (cached)
+Checking for function "isnan" with dependency -lm: YES (cached)
+Header "Python.h" has symbol "isnan" with dependency python-3.14: YES (cached)
+Checking for function "signbit" with dependency -lm: YES (cached)
+Header "Python.h" has symbol "signbit" with dependency python-3.14: YES (cached)
+Checking if "thread_local" compiles: NO (cached)
+Checking if "_Thread_local" compiles: YES (cached)
+Checking if "__thread" compiles: YES (cached)
+Checking if "__declspec(thread)" compiles: NO (cached)
+Checking for function "fallocate" : YES (cached)
+Header "Python.h" has symbol "HAVE_FTELLO" with dependency python-3.14: YES (cached)
+Header "Python.h" has symbol "HAVE_FSEEKO" with dependency python-3.14: YES (cached)
+Checking for function "backtrace" : YES (cached)
+Checking for function "madvise" : YES (cached)
+Has header "features.h" : YES (cached)
+Has header "xlocale.h" : NO (cached)
+Has header "dlfcn.h" : YES (cached)
+Has header "execinfo.h" : YES (cached)
+Has header "libunwind.h" : NO (cached)
+Has header "sys/mman.h" : YES (cached)
+Checking for function "strtold_l" : YES (cached)
+Checking if "__attribute__((optimize("unroll-loops")))" compiles: YES (cached)
+Checking if "__attribute__((optimize("O3")))" compiles: YES (cached)
+Checking if "__attribute__((nonnull(1)))" compiles: YES (cached)
+Compiler for C supports arguments -O3: YES (cached)
+Message: Long double format: INTEL_EXTENDED_16_BYTES_LE
+Has header "endian.h" : YES (cached)
+Has header "sys/endian.h" : NO (cached)
+Compiler for C supports function attribute visibility:hidden: YES (cached)
+Configuring config.h using configuration
+Configuring _numpyconfig.h using configuration
+Configuring numpy.pc using configuration
+Generating multi-targets for "_umath_tests.dispatch.h" 
+  Enabled targets: X86_V3, baseline
+Generating multi-targets for "argfunc.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "x86_simd_argsort.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3
+Generating multi-targets for "x86_simd_qsort.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3
+Generating multi-targets for "x86_simd_qsort_16bit.dispatch.h" 
+  Enabled targets: AVX512_SPR, AVX512_ICL
+Generating multi-targets for "highway_qsort.dispatch.h" 
+  Enabled targets: 
+Generating multi-targets for "highway_qsort_16bit.dispatch.h" 
+  Enabled targets: 
+Generating multi-targets for "loops_arithm_fp.dispatch.h" 
+  Enabled targets: X86_V3, baseline
+Generating multi-targets for "loops_arithmetic.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_arithmetic_timedelta.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_comparison.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_exponent_log.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_hyperbolic.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_logical.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_minmax.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_modulo.dispatch.h" 
+  Enabled targets: baseline
+Generating multi-targets for "loops_trigonometric.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_umath_fp.dispatch.h" 
+  Enabled targets: X86_V4, baseline
+Generating multi-targets for "loops_unary.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_unary_fp.dispatch.h" 
+  Enabled targets: baseline
+Generating multi-targets for "loops_unary_fp_le.dispatch.h" 
+  Enabled targets: baseline
+Generating multi-targets for "loops_unary_complex.dispatch.h" 
+  Enabled targets: X86_V4, X86_V3, baseline
+Generating multi-targets for "loops_autovec.dispatch.h" 
+  Enabled targets: X86_V3, baseline
+Generating multi-targets for "loops_half.dispatch.h" 
+  Enabled targets: AVX512_SPR, X86_V4, baseline
+WARNING: Project targets '>=1.8.3' but uses feature deprecated since '1.3.0': Source file src/umath/svml/linux/avx512/svml_z0_acos_d_la.s in the 'objects' kwarg is not an object..
+Generating multi-targets for "_simd.dispatch.h" 
+  Enabled targets: X86_V3, X86_V4, baseline
+Build targets in project: 101
+WARNING: Deprecated features used:
+ * 1.3.0: {'Source file src/umath/svml/linux/avx512/svml_z0_acos_d_la.s in the 'objects' kwarg is not an object.'}
+
+NumPy 2.6.0.dev0
+
+  User defined options
+    buildtype         : release
+    prefix            : /usr
+    python.bytecompile: -1
+
+Found ninja-1.13.2.git.kitware.jobserver-pipe-1 at /mnt/c/Dev/projects/numpy/.venv/bin/ninja
+[1/272] Generating numpy/generate-version with a custom command
+Saving version to numpy/version.py
+[2/272] Generating numpy/_core/__ufunc_api with a custom command (wrapped by meson to set env)
+[3/272] Generating numpy/_core/__multiarray_api with a custom command (wrapped by meson to set env)
+[4/138] Compiling C object numpy/_core/lib_umath_tests.dispatch.h_baseline.a.p/src_umath__umath_tests.dispatch.c.o
+[5/138] Compiling C object numpy/_core/libargfunc.dispatch.h_baseline.a.p/meson-generated_argfunc.dispatch.c.o
+[6/138] Compiling C object numpy/_core/lib_umath_tests.dispatch.h_X86_V3.a.p/src_umath__umath_tests.dispatch.c.o
+[7/138] Compiling C object numpy/_core/libargfunc.dispatch.h_X86_V4.a.p/meson-generated_argfunc.dispatch.c.o
+[8/138] Compiling C object numpy/_core/libargfunc.dispatch.h_X86_V3.a.p/meson-generated_argfunc.dispatch.c.o
+[9/138] Compiling C++ object numpy/_core/libx86_simd_qsort_16bit.dispatch.h_AVX512_ICL.a.p/src_npysort_x86_simd_qsort_16bit.dispatch.cpp.o
+[10/138] Compiling C object numpy/_core/libloops_arithm_fp.dispatch.h_baseline.a.p/meson-generated_loops_arithm_fp.dispatch.c.o
+[11/138] Compiling C++ object numpy/_core/libx86_simd_qsort.dispatch.h_X86_V4.a.p/src_npysort_x86_simd_qsort.dispatch.cpp.o
+[12/138] Compiling C object numpy/_core/libloops_arithmetic.dispatch.h_baseline.a.p/meson-generated_loops_arithmetic.dispatch.c.o
+[13/138] Compiling C++ object numpy/_core/libx86_simd_qsort_16bit.dispatch.h_AVX512_SPR.a.p/src_npysort_x86_simd_qsort_16bit.dispatch.cpp.o
+[14/138] Compiling C object numpy/_core/libloops_arithm_fp.dispatch.h_X86_V3.a.p/meson-generated_loops_arithm_fp.dispatch.c.o
+[15/138] Compiling C object numpy/_core/libloops_arithmetic.dispatch.h_X86_V4.a.p/meson-generated_loops_arithmetic.dispatch.c.o
+[16/138] Compiling C++ object numpy/_core/libx86_simd_argsort.dispatch.h_X86_V3.a.p/src_npysort_x86_simd_argsort.dispatch.cpp.o
+[17/138] Compiling C++ object numpy/_core/libloops_arithmetic_timedelta.dispatch.h_baseline.a.p/src_umath_loops_arithmetic_timedelta.dispatch.cpp.o
+[18/138] Compiling C++ object numpy/_core/libloops_arithmetic_timedelta.dispatch.h_X86_V4.a.p/src_umath_loops_arithmetic_timedelta.dispatch.cpp.o
+[19/138] Compiling C object numpy/_core/libloops_comparison.dispatch.h_baseline.a.p/meson-generated_loops_comparison.dispatch.c.o
+[20/138] Compiling C++ object numpy/_core/libx86_simd_argsort.dispatch.h_X86_V4.a.p/src_npysort_x86_simd_argsort.dispatch.cpp.o
+[21/138] Compiling C++ object numpy/_core/libx86_simd_qsort.dispatch.h_X86_V3.a.p/src_npysort_x86_simd_qsort.dispatch.cpp.o
+[22/138] Compiling C object numpy/_core/libloops_arithmetic.dispatch.h_X86_V3.a.p/meson-generated_loops_arithmetic.dispatch.c.o
+[23/138] Compiling C++ object numpy/_core/libloops_arithmetic_timedelta.dispatch.h_X86_V3.a.p/src_umath_loops_arithmetic_timedelta.dispatch.cpp.o
+[24/138] Compiling C object numpy/_core/libloops_comparison.dispatch.h_X86_V4.a.p/meson-generated_loops_comparison.dispatch.c.o
+[25/138] Compiling C object numpy/_core/libloops_comparison.dispatch.h_X86_V3.a.p/meson-generated_loops_comparison.dispatch.c.o
+[26/138] Compiling C object numpy/_core/libloops_exponent_log.dispatch.h_baseline.a.p/meson-generated_loops_exponent_log.dispatch.c.o
+[27/138] Compiling C object numpy/_core/libloops_exponent_log.dispatch.h_X86_V4.a.p/meson-generated_loops_exponent_log.dispatch.c.o
+[28/138] Compiling C object numpy/_core/libloops_exponent_log.dispatch.h_X86_V3.a.p/meson-generated_loops_exponent_log.dispatch.c.o
+[29/138] Compiling C++ object numpy/_core/libloops_hyperbolic.dispatch.h_baseline.a.p/meson-generated_loops_hyperbolic.dispatch.cpp.o
+[30/138] Compiling C++ object numpy/_core/libloops_hyperbolic.dispatch.h_X86_V4.a.p/meson-generated_loops_hyperbolic.dispatch.cpp.o
+[31/138] Compiling C++ object numpy/_core/libloops_hyperbolic.dispatch.h_X86_V3.a.p/meson-generated_loops_hyperbolic.dispatch.cpp.o
+[32/138] Compiling C++ object numpy/_core/libloops_logical.dispatch.h_baseline.a.p/src_umath_loops_logical.dispatch.cpp.o
+[33/138] Compiling C++ object numpy/_core/libloops_logical.dispatch.h_X86_V3.a.p/src_umath_loops_logical.dispatch.cpp.o
+[34/138] Compiling C object numpy/_core/libloops_minmax.dispatch.h_baseline.a.p/meson-generated_loops_minmax.dispatch.c.o
+[35/138] Compiling C++ object numpy/_core/libloops_logical.dispatch.h_X86_V4.a.p/src_umath_loops_logical.dispatch.cpp.o
+[36/138] Compiling C object numpy/_core/libloops_minmax.dispatch.h_X86_V4.a.p/meson-generated_loops_minmax.dispatch.c.o
+[37/138] Compiling C object numpy/_core/libloops_modulo.dispatch.h_baseline.a.p/meson-generated_loops_modulo.dispatch.c.o
+[38/138] Compiling C++ object numpy/_core/libloops_trigonometric.dispatch.h_baseline.a.p/src_umath_loops_trigonometric.dispatch.cpp.o
+[39/138] Compiling C object numpy/_core/libloops_minmax.dispatch.h_X86_V3.a.p/meson-generated_loops_minmax.dispatch.c.o
+[40/138] Compiling C++ object numpy/_core/libloops_trigonometric.dispatch.h_X86_V4.a.p/src_umath_loops_trigonometric.dispatch.cpp.o
+[41/138] Compiling C object numpy/_core/libloops_umath_fp.dispatch.h_baseline.a.p/meson-generated_loops_umath_fp.dispatch.c.o
+[42/138] Compiling C++ object numpy/_core/libloops_trigonometric.dispatch.h_X86_V3.a.p/src_umath_loops_trigonometric.dispatch.cpp.o
+[43/138] Compiling C object numpy/_core/libloops_umath_fp.dispatch.h_X86_V4.a.p/meson-generated_loops_umath_fp.dispatch.c.o
+[44/138] Compiling C object numpy/_core/libloops_unary.dispatch.h_baseline.a.p/meson-generated_loops_unary.dispatch.c.o
+[45/138] Compiling C object numpy/_core/libloops_unary.dispatch.h_X86_V4.a.p/meson-generated_loops_unary.dispatch.c.o
+[46/138] Compiling C object numpy/_core/libloops_unary.dispatch.h_X86_V3.a.p/meson-generated_loops_unary.dispatch.c.o
+[47/138] Compiling C object numpy/_core/libloops_unary_fp.dispatch.h_baseline.a.p/meson-generated_loops_unary_fp.dispatch.c.o
+[48/138] Compiling C object numpy/_core/libloops_unary_fp_le.dispatch.h_baseline.a.p/meson-generated_loops_unary_fp_le.dispatch.c.o
+[49/138] Compiling C object numpy/_core/libloops_unary_complex.dispatch.h_baseline.a.p/meson-generated_loops_unary_complex.dispatch.c.o
+[50/138] Compiling C object numpy/_core/libloops_unary_complex.dispatch.h_X86_V4.a.p/meson-generated_loops_unary_complex.dispatch.c.o
+[51/138] Compiling C object numpy/_core/libloops_autovec.dispatch.h_baseline.a.p/meson-generated_loops_autovec.dispatch.c.o
+[52/138] Compiling C object numpy/_core/libloops_half.dispatch.h_baseline.a.p/meson-generated_loops_half.dispatch.c.o
+[53/138] Compiling C object numpy/_core/libloops_unary_complex.dispatch.h_X86_V3.a.p/meson-generated_loops_unary_complex.dispatch.c.o
+[54/138] Compiling C object numpy/_core/libloops_autovec.dispatch.h_X86_V3.a.p/meson-generated_loops_autovec.dispatch.c.o
+[55/138] Compiling C object numpy/_core/libloops_half.dispatch.h_AVX512_SPR.a.p/meson-generated_loops_half.dispatch.c.o
+[56/138] Compiling C object numpy/_core/libloops_half.dispatch.h_X86_V4.a.p/meson-generated_loops_half.dispatch.c.o
+[57/138] Compiling C object numpy/_core/lib_simd.dispatch.h_baseline.a.p/meson-generated__simd.dispatch.c.o
+[58/138] Linking static target numpy/_core/lib_umath_tests_mtargets.a
+[59/138] Compiling C object numpy/_core/lib_simd.dispatch.h_X86_V4.a.p/meson-generated__simd.dispatch.c.o
+[60/138] Compiling C object numpy/_core/lib_simd.dispatch.h_X86_V3.a.p/meson-generated__simd.dispatch.c.o
+[61/138] Compiling C object numpy/_core/_umath_tests.cpython-314-x86_64-linux-gnu.so.p/meson-generated__umath_tests.c.o
+[62/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/meson-generated_arraytypes.c.o
+[63/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_multiarray_arrayobject.c.o
+[64/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_multiarray_calculation.c.o
+[65/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/meson-generated_scalartypes.c.o
+[66/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_multiarray_dtypemeta.c.o
+[67/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_multiarray_conversion_utils.c.o
+[68/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/meson-generated_scalarmath.c.o
+[69/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_multiarray_multiarraymodule.c.o
+[70/138] Compiling C++ object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_npysort_selection_methods.cpp.o
+[71/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/meson-generated_matmul.c.o
+[72/138] Compiling C++ object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_umath_minmax.cpp.o
+[73/138] Compiling C++ object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_npysort_npysort_methods.cpp.o
+[74/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_umath_umathmodule.c.o
+[75/138] Linking static target numpy/_core/lib_simd_mtargets.a
+[76/138] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_multiarray_item_selection.c.o
+[77/138] Compiling C object numpy/_core/_simd.cpython-314-x86_64-linux-gnu.so.p/src__simd__simd.c.o
+[78/138] Linking static target numpy/_core/lib_umath_tests.dispatch.h_baseline.a
+[79/138] Linking static target numpy/_core/lib_umath_tests.dispatch.h_X86_V3.a
+[80/138] Linking static target numpy/_core/libargfunc.dispatch.h_baseline.a
+[81/138] Linking static target numpy/_core/libargfunc.dispatch.h_X86_V4.a
+[82/138] Linking static target numpy/_core/libargfunc.dispatch.h_X86_V3.a
+[83/138] Linking static target numpy/_core/libx86_simd_argsort.dispatch.h_X86_V4.a
+[84/138] Linking static target numpy/_core/libx86_simd_argsort.dispatch.h_X86_V3.a
+[85/138] Linking static target numpy/_core/libx86_simd_qsort.dispatch.h_X86_V4.a
+[86/138] Linking static target numpy/_core/libx86_simd_qsort.dispatch.h_X86_V3.a
+[87/138] Linking static target numpy/_core/libx86_simd_qsort_16bit.dispatch.h_AVX512_SPR.a
+[88/138] Linking static target numpy/_core/libx86_simd_qsort_16bit.dispatch.h_AVX512_ICL.a
+[89/138] Linking static target numpy/_core/libloops_arithm_fp.dispatch.h_baseline.a
+[90/138] Linking static target numpy/_core/libloops_arithmetic.dispatch.h_baseline.a
+[91/138] Linking static target numpy/_core/lib_multiarray_umath_mtargets.a
+[92/138] Linking static target numpy/_core/libloops_arithmetic.dispatch.h_X86_V4.a
+[93/138] Linking static target numpy/_core/libloops_arithm_fp.dispatch.h_X86_V3.a
+[94/138] Linking static target numpy/_core/libloops_arithmetic.dispatch.h_X86_V3.a
+[95/138] Linking static target numpy/_core/libloops_arithmetic_timedelta.dispatch.h_baseline.a
+[96/138] Linking static target numpy/_core/libloops_arithmetic_timedelta.dispatch.h_X86_V4.a
+[97/138] Linking static target numpy/_core/libloops_comparison.dispatch.h_baseline.a
+[98/138] Linking static target numpy/_core/libloops_arithmetic_timedelta.dispatch.h_X86_V3.a
+[99/138] Linking static target numpy/_core/libloops_comparison.dispatch.h_X86_V3.a
+[100/138] Linking static target numpy/_core/libloops_comparison.dispatch.h_X86_V4.a
+[101/138] Linking static target numpy/_core/libloops_exponent_log.dispatch.h_X86_V4.a
+[102/138] Linking static target numpy/_core/libloops_exponent_log.dispatch.h_X86_V3.a
+[103/138] Linking static target numpy/_core/libloops_hyperbolic.dispatch.h_baseline.a
+[104/138] Linking static target numpy/_core/libloops_hyperbolic.dispatch.h_X86_V4.a
+[105/138] Linking static target numpy/_core/libloops_exponent_log.dispatch.h_baseline.a
+[106/138] Linking static target numpy/_core/libloops_hyperbolic.dispatch.h_X86_V3.a
+[107/138] Linking static target numpy/_core/libloops_logical.dispatch.h_X86_V4.a
+[108/138] Linking static target numpy/_core/libloops_logical.dispatch.h_X86_V3.a
+[109/138] Linking static target numpy/_core/libloops_minmax.dispatch.h_X86_V4.a
+[110/138] Linking static target numpy/_core/libloops_minmax.dispatch.h_baseline.a
+[111/138] Linking static target numpy/_core/libloops_logical.dispatch.h_baseline.a
+[112/138] Linking static target numpy/_core/libloops_trigonometric.dispatch.h_X86_V4.a
+[113/138] Linking static target numpy/_core/libloops_modulo.dispatch.h_baseline.a
+[114/138] Linking static target numpy/_core/libloops_trigonometric.dispatch.h_baseline.a
+[115/138] Linking static target numpy/_core/libloops_minmax.dispatch.h_X86_V3.a
+[116/138] Linking static target numpy/_core/libloops_trigonometric.dispatch.h_X86_V3.a
+[117/138] Linking static target numpy/_core/libloops_umath_fp.dispatch.h_baseline.a
+[118/138] Linking static target numpy/_core/libloops_umath_fp.dispatch.h_X86_V4.a
+[119/138] Linking static target numpy/_core/libloops_unary.dispatch.h_X86_V4.a
+[120/138] Linking static target numpy/_core/libloops_unary.dispatch.h_baseline.a
+[121/138] Linking static target numpy/_core/libloops_unary.dispatch.h_X86_V3.a
+[122/138] Linking static target numpy/_core/libloops_unary_fp_le.dispatch.h_baseline.a
+[123/138] Linking static target numpy/_core/libloops_unary_fp.dispatch.h_baseline.a
+[124/138] Linking static target numpy/_core/libloops_unary_complex.dispatch.h_baseline.a
+[125/138] Linking static target numpy/_core/libloops_unary_complex.dispatch.h_X86_V4.a
+[126/138] Linking static target numpy/_core/libloops_unary_complex.dispatch.h_X86_V3.a
+[127/138] Linking static target numpy/_core/libloops_half.dispatch.h_X86_V4.a
+[128/138] Linking static target numpy/_core/libloops_autovec.dispatch.h_baseline.a
+[129/138] Linking static target numpy/_core/libloops_half.dispatch.h_baseline.a
+[130/138] Linking static target numpy/_core/libloops_autovec.dispatch.h_X86_V3.a
+[131/138] Linking static target numpy/_core/libloops_half.dispatch.h_AVX512_SPR.a
+[132/138] Linking static target numpy/_core/lib_simd.dispatch.h_baseline.a
+[133/138] Linking static target numpy/_core/lib_simd.dispatch.h_X86_V4.a
+[134/138] Linking static target numpy/_core/lib_simd.dispatch.h_X86_V3.a
+[135/138] Linking target numpy/_core/_umath_tests.cpython-314-x86_64-linux-gnu.so
+[136/138] Linking target numpy/_core/_simd.cpython-314-x86_64-linux-gnu.so
+[137/138] Linking target numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /mnt/c/Dev/projects/numpy/.venv/bin/ninja -C /home/tuannq/work/np-base/build-rel -j 16
+$ /mnt/c/Dev/projects/numpy/.venv/bin/python3 vendored-meson/meson/meson.py install --no-rebuild --only-changed -C build-rel --destdir ../build-rel-install
+
+real	0m14.519s
+user	0m3.855s
+sys	0m2.651s

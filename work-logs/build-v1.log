@@ -1,0 +1,9 @@
+$ /mnt/c/Dev/projects/numpy/.venv/bin/python3 vendored-meson/meson/meson.py compile -j 16 -C build-rel
+ninja: Entering directory `/home/tuannq/work/np-base/build-rel'
+[1/3] Generating numpy/generate-version with a custom command
+Saving version to numpy/version.py
+[2/3] Compiling C object numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so.p/src_multiarray_calculation.c.o
+[3/3] Linking target numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /mnt/c/Dev/projects/numpy/.venv/bin/ninja -C /home/tuannq/work/np-base/build-rel -j 16
+$ /mnt/c/Dev/projects/numpy/.venv/bin/python3 vendored-meson/meson/meson.py install --no-rebuild --only-changed -C build-rel --destdir ../build-rel-install

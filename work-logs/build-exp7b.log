@@ -1,0 +1,16 @@
+ninja: Entering directory `/home/tuannq/work/np-base/build-rel'
+[1/12] Generating 'numpy/_core/libround.dispatch.h_X86_V4.a.p/round.dispatch.c'
+[2/12] Generating 'numpy/_core/libround.dispatch.h_X86_V3.a.p/round.dispatch.c'
+[3/12] Generating 'numpy/_core/libround.dispatch.h_baseline.a.p/round.dispatch.c'
+[4/12] Generating numpy/generate-version with a custom command
+Saving version to numpy/version.py
+[5/12] Compiling C object numpy/_core/libround.dispatch.h_baseline.a.p/meson-generated_round.dispatch.c.o
+[6/12] Linking static target numpy/_core/libround.dispatch.h_baseline.a
+[7/12] Compiling C object numpy/_core/libround.dispatch.h_X86_V4.a.p/meson-generated_round.dispatch.c.o
+[8/12] Linking static target numpy/_core/libround.dispatch.h_X86_V4.a
+[9/12] Compiling C object numpy/_core/libround.dispatch.h_X86_V3.a.p/meson-generated_round.dispatch.c.o
+[10/12] Linking static target numpy/_core/libround.dispatch.h_X86_V3.a
+[11/12] Linking static target numpy/_core/lib_multiarray_umath_mtargets.a
+[12/12] Linking target numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /mnt/c/Dev/projects/numpy/.venv/bin/ninja -C /home/tuannq/work/np-base/build-rel -j 12

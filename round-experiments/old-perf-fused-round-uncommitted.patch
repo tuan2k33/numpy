@@ -1,0 +1,111 @@
+diff --git a/numpy/_core/src/multiarray/round.dispatch.c.src b/numpy/_core/src/multiarray/round.dispatch.c.src
+index 84c57e858e..05bbf92286 100644
+--- a/numpy/_core/src/multiarray/round.dispatch.c.src
++++ b/numpy/_core/src/multiarray/round.dispatch.c.src
+@@ -34,12 +34,16 @@
+     #define ROUND_HAVE_F16C 0
+ #endif
+ 
++/* elements staged through a contiguous buffer for strided data */
++#define ROUND_BLOCK 256
++
+ /**begin repeat
+  * #TYPE  = FLOAT, DOUBLE#
+  * #type  = float, double#
+  * #sfx   = f32, f64#
+  * #rint  = npy_rintf, npy_rint#
+  * #VCHK  = NPY_SIMD_F32, NPY_SIMD_F64#
++ * #STAGE = 1, 0#
+  */
+ static NPY_INLINE @type@
+ round_scalar_@sfx@(@type@ x, @type@ p, int neg)
+@@ -87,18 +91,61 @@ NPY_CPU_DISPATCH_CURFX(ROUND_@TYPE@)(const char *src, npy_intp src_stride,
+     const @type@ p = (@type@)pd;
+ #if @VCHK@
+     const npy_intp lsize = sizeof(@type@);
+-    if (src_stride % lsize == 0 && dst_stride % lsize == 0 &&
+-            npyv_loadable_stride_@sfx@(src_stride) &&
+-            npyv_storable_stride_@sfx@(dst_stride)) {
+-        if (neg) {
+-            round_simd_loop_@sfx@((const @type@ *)src, src_stride / lsize,
+-                                  (@type@ *)dst, dst_stride / lsize, len, p, 1);
++    if (src_stride % lsize == 0 && dst_stride % lsize == 0) {
++        const npy_intp ss = src_stride / lsize;
++        const npy_intp ds = dst_stride / lsize;
++#if @STAGE@
++        if (ss != 1 || ds != 1) {
++            /*
++             * float32 with strided input or output: strided SIMD loads and
++             * stores are gathers or emulated, which made this slower than the
++             * old three pass version.  Move the strides in plain scalar loops
++             * and run the contiguous kernel on a block.
++             */
++            @type@ buf[ROUND_BLOCK];
++            const @type@ *s = (const @type@ *)src;
++            @type@ *d = (@type@ *)dst;
++            while (len > 0) {
++                npy_intp n = len < ROUND_BLOCK ? len : ROUND_BLOCK;
++                const @type@ *in = s;
++                @type@ *out = d;
++                if (ss != 1) {
++                    for (npy_intp i = 0; i < n; i++) {
++                        buf[i] = s[i * ss];
++                    }
++                    in = buf;
++                }
++                if (ds != 1) {
++                    out = buf;
++                }
++                if (neg) {
++                    round_simd_loop_@sfx@(in, 1, out, 1, n, p, 1);
++                }
++                else {
++                    round_simd_loop_@sfx@(in, 1, out, 1, n, p, 0);
++                }
++                if (ds != 1) {
++                    for (npy_intp i = 0; i < n; i++) {
++                        d[i * ds] = buf[i];
++                    }
++                }
++                s += n * ss;
++                d += n * ds;
++                len -= n;
++            }
++            return;
+         }
+-        else {
+-            round_simd_loop_@sfx@((const @type@ *)src, src_stride / lsize,
+-                                  (@type@ *)dst, dst_stride / lsize, len, p, 0);
++#endif
++        if (npyv_loadable_stride_@sfx@(src_stride) &&
++                npyv_storable_stride_@sfx@(dst_stride)) {
++            if (neg) {
++                round_simd_loop_@sfx@((const @type@ *)src, ss, (@type@ *)dst, ds, len, p, 1);
++            }
++            else {
++                round_simd_loop_@sfx@((const @type@ *)src, ss, (@type@ *)dst, ds, len, p, 0);
++            }
++            return;
+         }
+-        return;
+     }
+ #endif
+     for (; len > 0; --len, src += src_stride, dst += dst_stride) {
+diff --git a/numpy/_core/tests/test_multiarray.py b/numpy/_core/tests/test_multiarray.py
+index 1032fcdc37..198568bc95 100644
+--- a/numpy/_core/tests/test_multiarray.py
++++ b/numpy/_core/tests/test_multiarray.py
+@@ -2302,6 +2302,13 @@ def check(res, exp):
+             out = np.empty_like(a)
+             assert np.round(a, decimals, out=out) is out
+             check(out, expected)
++            # strided output, and strided input and output at once
++            sout = np.empty(2 * a.size, dtype=a.dtype)[::2]
++            assert np.round(a, decimals, out=sout) is sout
++            check(sout, expected)
++            sout = np.empty(3 * len(a[::3]), dtype=a.dtype)[::3]
++            assert np.round(a[::3], decimals, out=sout) is sout
++            check(sout, expected[::3])
+             b = a.copy()
+             assert np.round(b, decimals, out=b) is b
+             check(b, expected)
